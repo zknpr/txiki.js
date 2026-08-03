@@ -41,6 +41,28 @@ class Database {
         sqlite3.exec(this.#handle, sql);
     }
 
+    interrupt() {
+        if (this.#handle) {
+            sqlite3.interrupt(this.#handle);
+        }
+    }
+
+    setQueryDeadline(ms) {
+        if (!this.#handle) {
+            throw new Error('Invalid DB');
+        }
+
+        sqlite3.set_query_deadline(this.#handle, ms);
+    }
+
+    clearQueryDeadline() {
+        if (!this.#handle) {
+            throw new Error('Invalid DB');
+        }
+
+        sqlite3.clear_query_deadline(this.#handle);
+    }
+
     prepare(sql) {
         if (!this.#handle) {
             throw new Error('Invalid DB');
@@ -190,4 +212,91 @@ class Statement {
 }
 
 
-export { Database };
+class AsyncDatabase {
+    #handle;
+    #tail = Promise.resolve();
+    #closing = false;
+    #closePromise;
+
+    constructor(dbName = ':memory:', options = { create: true, readOnly: false }) {
+        let flags = 0;
+
+        if (options.create) {
+            flags |= sqlite3.SQLITE_OPEN_CREATE;
+        }
+
+        if (options.readOnly) {
+            flags |= sqlite3.SQLITE_OPEN_READONLY;
+        } else {
+            flags |= sqlite3.SQLITE_OPEN_READWRITE;
+        }
+
+        this.#handle = sqlite3.open(dbName, flags);
+    }
+
+    #enqueue(operation) {
+        if (!this.#handle || this.#closing) {
+            return Promise.reject(new Error('Invalid DB'));
+        }
+
+        const handle = this.#handle;
+        const result = this.#tail.then(() => operation(handle));
+
+        // A rejected operation must not poison the per-connection FIFO.
+        this.#tail = result.then(() => undefined, () => undefined);
+        return result;
+    }
+
+    run(sql, ...args) {
+        if (args.length === 1 && typeof args[0] === 'object') {
+            args = args[0];
+        }
+
+        return this.#enqueue(handle => sqlite3.async_run(handle, sql, args));
+    }
+
+    all(sql, ...args) {
+        if (args.length === 1 && typeof args[0] === 'object') {
+            args = args[0];
+        }
+
+        return this.#enqueue(handle => sqlite3.async_all(handle, sql, args));
+    }
+
+    interrupt() {
+        if (this.#handle) {
+            sqlite3.interrupt(this.#handle);
+        }
+    }
+
+    close() {
+        if (this.#closePromise) {
+            return this.#closePromise;
+        }
+        if (!this.#handle) {
+            return Promise.resolve();
+        }
+
+        const handle = this.#handle;
+        this.#closing = true;
+
+        const close = this.#tail.then(() => sqlite3.close(handle));
+        this.#closePromise = close.then(() => {
+            this.#handle = null;
+        }, error => {
+            this.#closing = false;
+            this.#closePromise = undefined;
+            throw error;
+        });
+        this.#tail = this.#closePromise.then(() => undefined, () => undefined);
+
+        return this.#closePromise;
+    }
+
+    [Symbol.asyncDispose]() {
+        return this.close();
+    }
+}
+
+
+export { AsyncDatabase, Database };

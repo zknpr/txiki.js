@@ -5,6 +5,7 @@
   ],
   "sqlite": [
     "test-sqlite.js",
+    "test-sqlite-interrupt.js",
     "test-dispose-database.js",
     "test-dispose-statement.js",
     "test-storage.js"
