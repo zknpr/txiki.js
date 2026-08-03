@@ -1,0 +1,77 @@
+name: SQLite Explorer artifacts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-unix:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-macos
+            runner: macos-15
+          - target: x86_64-macos
+            runner: macos-15-intel
+          - target: x86_64-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-linux-gnu
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libffi-dev
+      - name: Build
+        run: make
+      - name: Package
+        run: |
+          mkdir -p artifact
+          cp build/tjs artifact/tjs
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: artifact
+          if-no-files-found: error
+
+  build-windows:
+    name: x86_64-windows
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-windows
+      VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: '66c0373dc7fca549e5803087b9487edfe3aca0a1'
+      - name: Install native dependencies
+        run: vcpkg install libffi:x64-windows-static
+      - name: Configure
+        run: |
+          cmake -B build -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Package
+        run: |
+          New-Item -ItemType Directory -Path artifact | Out-Null
+          Copy-Item build/Release/tjs.exe artifact/tjs.exe
+      - uses: actions/upload-artifact@v7
+        with:
+          name: x86_64-windows
+          path: artifact
+          if-no-files-found: error
