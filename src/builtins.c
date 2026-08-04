@@ -38,6 +38,7 @@
 #endif
 #include "bundles/c/stdlib/utils.c"
 #include "bundles/c/stdlib/uuid.c"
+#include "bundles/c/stdlib/v8.c"
 #ifdef TJS_HAVE_WASM
 #include "bundles/c/stdlib/wasi.c"
 #endif
@@ -67,6 +68,7 @@ static tjs_builtin_t builtins[] = {
 #endif
     { "tjs:utils", tjs__utils, sizeof(tjs__utils) },
     { "tjs:uuid", tjs__uuid, sizeof(tjs__uuid) },
+    { "tjs:v8", tjs__v8, sizeof(tjs__v8) },
 #ifdef TJS_HAVE_WASM
     { "tjs:wasi", tjs__wasi, sizeof(tjs__wasi) },
 #endif

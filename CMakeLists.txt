@@ -193,6 +193,104 @@ endif()
 
 target_include_directories(tjs PUBLIC src)
 
+###
+### V8 wire-format compatibility module (Zig)
+###
+
+find_program(TJS_ZIG_EXECUTABLE NAMES zig REQUIRED)
+set(TJS_ZIG_TARGET "" CACHE STRING "Zig target triple for the tjs:v8 compatibility library")
+
+if(NOT TJS_ZIG_TARGET)
+    set(_tjs_zig_arch "${CMAKE_SYSTEM_PROCESSOR}")
+    if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+        set(_tjs_osx_architectures ${CMAKE_OSX_ARCHITECTURES})
+        list(LENGTH _tjs_osx_architectures _tjs_osx_architecture_count)
+        if(_tjs_osx_architecture_count EQUAL 1)
+            list(GET _tjs_osx_architectures 0 _tjs_zig_arch)
+        endif()
+    elseif(ANDROID AND ANDROID_ABI)
+        set(_tjs_zig_arch "${ANDROID_ABI}")
+    endif()
+    string(TOLOWER "${_tjs_zig_arch}" _tjs_zig_arch)
+
+    if(_tjs_zig_arch MATCHES "^(arm64|arm64-v8a|aarch64)$")
+        set(_tjs_zig_arch "aarch64")
+    elseif(_tjs_zig_arch MATCHES "^(amd64|x64|x86_64)$")
+        set(_tjs_zig_arch "x86_64")
+    else()
+        message(FATAL_ERROR "Set TJS_ZIG_TARGET explicitly for unsupported architecture: ${_tjs_zig_arch}")
+    endif()
+
+    if(APPLE)
+        set(TJS_ZIG_TARGET "${_tjs_zig_arch}-macos")
+    elseif(ANDROID)
+        set(TJS_ZIG_TARGET "${_tjs_zig_arch}-linux-android")
+    elseif(WIN32)
+        set(TJS_ZIG_TARGET "${_tjs_zig_arch}-windows-msvc")
+    elseif(CMAKE_C_COMPILER_TARGET MATCHES "musl" OR CMAKE_C_LIBRARY_ARCHITECTURE MATCHES "musl")
+        set(TJS_ZIG_TARGET "${_tjs_zig_arch}-linux-musl")
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set(TJS_ZIG_TARGET "${_tjs_zig_arch}-linux-gnu")
+    else()
+        message(FATAL_ERROR "Set TJS_ZIG_TARGET explicitly for unsupported system: ${CMAKE_SYSTEM_NAME}")
+    endif()
+endif()
+message(STATUS "Building tjs:v8 Zig library for ${TJS_ZIG_TARGET}")
+
+if(CMAKE_BUILD_TYPE MATCHES "Debug")
+    set(TJS_ZIG_OPTIMIZE Debug)
+elseif(CMAKE_BUILD_TYPE MATCHES "MinSizeRel")
+    set(TJS_ZIG_OPTIMIZE ReleaseSmall)
+else()
+    set(TJS_ZIG_OPTIMIZE ReleaseFast)
+endif()
+
+if(MSVC)
+    set(TJS_ZIG_LIBRARY "${CMAKE_BINARY_DIR}/tjs_v8.lib")
+else()
+    set(TJS_ZIG_LIBRARY "${CMAKE_BINARY_DIR}/libtjs_v8.a")
+endif()
+set(TJS_ZIG_CACHE_DIR "${CMAKE_BINARY_DIR}/zig-cache")
+set(TJS_ZIG_GLOBAL_CACHE_DIR "${CMAKE_BINARY_DIR}/zig-global-cache")
+set(TJS_ZIG_SYSTEM_INCLUDE_ARGS)
+foreach(_tjs_system_include IN LISTS CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES)
+    list(APPEND TJS_ZIG_SYSTEM_INCLUDE_ARGS "-I${_tjs_system_include}")
+endforeach()
+set(TJS_ZIG_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/mod_v8_compat.zig"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/tjs_qjs_allocator.zig"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/tjs_structs.zig"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/v8_serialize.zig"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/zig_c_bindings.zig"
+)
+
+add_custom_command(
+    OUTPUT "${TJS_ZIG_LIBRARY}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${TJS_ZIG_CACHE_DIR}" "${TJS_ZIG_GLOBAL_CACHE_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "ZIG_LOCAL_CACHE_DIR=${TJS_ZIG_CACHE_DIR}"
+        "ZIG_GLOBAL_CACHE_DIR=${TJS_ZIG_GLOBAL_CACHE_DIR}"
+        "${TJS_ZIG_EXECUTABLE}" build-lib "${CMAKE_CURRENT_SOURCE_DIR}/src/zig_c_bindings.zig"
+        -target "${TJS_ZIG_TARGET}"
+        "-O${TJS_ZIG_OPTIMIZE}"
+        "-I${CMAKE_CURRENT_SOURCE_DIR}/deps/quickjs"
+        "-I${CMAKE_CURRENT_SOURCE_DIR}/src"
+        ${TJS_ZIG_SYSTEM_INCLUDE_ARGS}
+        -lc
+        "-femit-bin=${TJS_ZIG_LIBRARY}"
+        --cache-dir "${TJS_ZIG_CACHE_DIR}"
+        --global-cache-dir "${TJS_ZIG_GLOBAL_CACHE_DIR}"
+    DEPENDS ${TJS_ZIG_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/deps/quickjs/quickjs.h"
+    COMMENT "Building tjs:v8 Zig static library"
+    COMMAND_EXPAND_LISTS
+    VERBATIM
+)
+add_custom_target(tjs-v8-zig DEPENDS "${TJS_ZIG_LIBRARY}")
+add_dependencies(tjs tjs-v8-zig)
+# Keep this before qjs in the transitive link order: the Zig archive references
+# public QuickJS symbols which the following qjs archive resolves.
+target_link_libraries(tjs PUBLIC "${TJS_ZIG_LIBRARY}")
+
 add_executable(tjs-cli
     src/cli.c
 )
@@ -234,6 +332,30 @@ add_executable(tjsc EXCLUDE_FROM_ALL
 add_subdirectory(deps/quickjs EXCLUDE_FROM_ALL)
 target_link_libraries(tjs PUBLIC qjs)
 target_link_libraries(tjsc qjs)
+
+set(TJS_ZIG_TEST_LINK_ARGS -lc)
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+    list(APPEND TJS_ZIG_TEST_LINK_ARGS -lm -ldl -lpthread)
+endif()
+add_custom_target(v8-zig-test
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "ZIG_LOCAL_CACHE_DIR=${TJS_ZIG_CACHE_DIR}"
+        "ZIG_GLOBAL_CACHE_DIR=${TJS_ZIG_GLOBAL_CACHE_DIR}"
+        "${TJS_ZIG_EXECUTABLE}" test "${CMAKE_CURRENT_SOURCE_DIR}/src/v8_serialize_test.zig"
+        "$<TARGET_FILE:qjs>"
+        -target "${TJS_ZIG_TARGET}"
+        "-I${CMAKE_CURRENT_SOURCE_DIR}/deps/quickjs"
+        "-I${CMAKE_CURRENT_SOURCE_DIR}/src"
+        ${TJS_ZIG_SYSTEM_INCLUDE_ARGS}
+        ${TJS_ZIG_TEST_LINK_ARGS}
+        --cache-dir "${TJS_ZIG_CACHE_DIR}"
+        --global-cache-dir "${TJS_ZIG_GLOBAL_CACHE_DIR}"
+    DEPENDS qjs ${TJS_ZIG_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/src/v8_serialize_test.zig"
+    COMMENT "Running tjs:v8 Zig tests"
+    COMMAND_EXPAND_LISTS
+    VERBATIM
+    USES_TERMINAL
+)
 
 if(BUILD_WITH_MIMALLOC)
     option(MI_OVERRIDE "" OFF)
@@ -525,4 +647,3 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU")
 endif()
 target_link_libraries(tjs PUBLIC websockets)
 target_include_directories(tjs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/libwebsockets/include)
-
