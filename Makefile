@@ -1,6 +1,11 @@
 BUILD_DIR=build
 BUILDTYPE?=Release
 MIMALLOC?=ON
+TJS_ZIG_TARGET?=
+
+ifneq ($(TJS_ZIG_TARGET),)
+TJS_ZIG_TARGET_ARG=-DTJS_ZIG_TARGET=$(TJS_ZIG_TARGET)
+endif
 
 JOBS?=$(shell getconf _NPROCESSORS_ONLN)
 ifeq ($(JOBS),)
@@ -30,7 +35,7 @@ endif
 all: $(TJS)
 
 $(BUILD_DIR)/CMakeCache.txt:
-	cmake -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILDTYPE) -DBUILD_WITH_MIMALLOC=$(MIMALLOC)
+	cmake -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILDTYPE) -DBUILD_WITH_MIMALLOC=$(MIMALLOC) $(TJS_ZIG_TARGET_ARG)
 
 $(TJS): $(BUILD_DIR)/CMakeCache.txt
 	cmake --build $(BUILD_DIR) -j $(JOBS)
@@ -131,6 +136,18 @@ src/bundles/c/internal/path.c: $(TJSC) src/js/internal/path.js
 
 core: src/bundles/c/core/polyfills.c src/bundles/c/core/core.c src/bundles/c/core/run-main.c src/bundles/c/core/run-repl.c src/bundles/c/core/worker-bootstrap.c src/bundles/c/internal/path.c
 
+# tjs:v8 has no source-level dependencies to bundle. Compile it directly so
+# the native bootstrap and its bytecode can be built before npm dependencies
+# are installed, while still keeping the generated C file under `make js`.
+src/bundles/c/stdlib/v8.c: $(TJSC) src/js/stdlib/v8.js
+	@mkdir -p $(basename $(dir $@))
+	$(TJSC) -m \
+		$(TJSC_PARAMS_STIP) \
+		-o $@ \
+		-n "tjs:v8" \
+		-p tjs__ \
+		src/js/stdlib/v8.js
+
 src/bundles/c/stdlib/%.c: $(TJSC) src/bundles/js/stdlib/%.js
 	@mkdir -p $(basename $(dir $@))
 	$(TJSC) -m \
@@ -191,4 +208,3 @@ test-advanced:
 
 .PRECIOUS: src/bundles/js/core/%.js src/bundles/js/stdlib/%.js
 .PHONY: all js debug install clean distclean format lint test test-advanced core stdlib $(TJS) $(TJSC)
-

@@ -89,6 +89,22 @@ declare module 'tjs:sqlite'{
         exec(sql: string): void;
 
         /**
+         * Interrupt any currently running operation on this database.
+         * Calling this while no operation is running has no effect.
+         */
+        interrupt(): void;
+
+        /**
+         * Abort synchronous queries once the given duration has elapsed.
+         *
+         * @param ms - Deadline duration in milliseconds. Must be finite and nonnegative.
+         */
+        setQueryDeadline(ms: number): void;
+
+        /** Disable the currently armed synchronous query deadline. */
+        clearQueryDeadline(): void;
+
+        /**
          * Create a prepared statement, to run SQL queries.
          *
          * @param sql - The SQL query that will run.
@@ -158,4 +174,42 @@ declare module 'tjs:sqlite'{
 
     }
     export interface Database extends Disposable {}
+
+    export interface IAsyncDatabaseOperationOptions {
+        /** Abort the operation before it starts or interrupt it while running. */
+        signal?: AbortSignal;
+    }
+
+    export class AsyncDatabase {
+        /**
+         * Opens a SQLite database whose operations execute on the thread pool.
+         * Operations are executed in strict FIFO order per connection.
+         *
+         * @param dbName The path of the database. Defaults to `:memory:`.
+         * @param options Options when opening the database.
+         */
+        constructor(dbName?: string, options?: IDatabaseOptions);
+
+        /** Execute a statement, ignoring any result rows. */
+        run(sql: string, params: any, options?: IAsyncDatabaseOperationOptions): Promise<void>;
+        run(sql: string, ...args: any[]): Promise<void>;
+
+        /** Execute a query and return its result rows. */
+        all(sql: string, params: any, options?: IAsyncDatabaseOperationOptions): Promise<any[]>;
+        all(sql: string, ...args: any[]): Promise<any[]>;
+
+        /**
+         * Interrupt the currently running operation. Calling this while no
+         * operation is running has no effect.
+         */
+        interrupt(): void;
+
+        /**
+         * Wait for queued operations, then close the database. Idempotent.
+         *
+         * Aliased as `Symbol.asyncDispose`.
+         */
+        close(): Promise<void>;
+    }
+    export interface AsyncDatabase extends AsyncDisposable {}
 }

@@ -25,6 +25,7 @@
 #include "mem.h"
 #include "private.h"
 #include "tjs.h"
+#include "zig_c_bindings.h"
 
 #include <assert.h>
 #include <signal.h>
@@ -242,6 +243,11 @@ static JSValue tjs__set_import_map_resolver(JSContext *ctx, JSValue this_val, in
 }
 
 static void tjs__bootstrap_core(JSContext *ctx, JSValue ns) {
+    JSValue v8 = JS_NewObjectProto(ctx, JS_NULL);
+    CHECK_EQ(JS_IsException(v8), false);
+    CHECK_EQ(zig__mod_v8_compat_init(ctx, v8), 0);
+    CHECK_EQ(JS_DefinePropertyValueStr(ctx, ns, "v8", v8, JS_PROP_C_W_E), true);
+
     tjs__mod_channel_init(ctx, ns);
     tjs__mod_dns_init(ctx, ns);
     tjs__mod_engine_init(ctx, ns);

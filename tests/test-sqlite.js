@@ -81,6 +81,44 @@ function testCloseWithLiveStatement() {
     stmt.finalize();
 }
 
+function testDefaultPageAndCacheSizes() {
+    const db = new Database();
+
+    assert.eq(db.prepare('PRAGMA page_size').all()[0].page_size, 8192);
+    assert.eq(db.prepare('PRAGMA cache_size').all()[0].cache_size, -16384);
+
+    db.close();
+}
+
+function testIntegerResultPrecision() {
+    const db = new Database();
+    const row = db.prepare(`
+        SELECT
+            9007199254740991 AS safe_max,
+            9007199254740992 AS unsafe_power,
+            9007199254740993 AS unsafe_adjacent,
+            9223372036854775807 AS int64_max,
+            -9007199254740991 AS safe_min,
+            -9007199254740992 AS unsafe_negative,
+            -9223372036854775808 AS int64_min
+    `).all()[0];
+
+    assert.eq(typeof row.safe_max, 'number');
+    assert.eq(row.safe_max, 9007199254740991);
+    assert.eq(typeof row.safe_min, 'number');
+    assert.eq(row.safe_min, -9007199254740991);
+
+    assert.eq(typeof row.unsafe_power, 'bigint');
+    assert.eq(row.unsafe_power, 9007199254740992n);
+    assert.eq(row.unsafe_adjacent, 9007199254740993n);
+    assert.ok(row.unsafe_power !== row.unsafe_adjacent, 'adjacent unsafe integers remain distinct');
+    assert.eq(row.int64_max, 9223372036854775807n);
+    assert.eq(row.unsafe_negative, -9007199254740992n);
+    assert.eq(row.int64_min, -9223372036854775808n);
+
+    db.close();
+}
+
 testTypes();
 testExistingDB();
 
@@ -96,6 +134,8 @@ await tjs.remove(newDb);
 
 testNewDbNoCreate();
 testCloseWithLiveStatement();
+testDefaultPageAndCacheSizes();
+testIntegerResultPrecision();
 
 function testTransactions() {
     const db = new Database();

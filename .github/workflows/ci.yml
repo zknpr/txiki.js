@@ -37,6 +37,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
       - uses: actions/setup-node@v7
         with:
           check-latest: true
@@ -65,6 +68,9 @@ jobs:
     - uses: actions/checkout@v7
       with:
         submodules: recursive
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
     - uses: actions/setup-node@v7
       with:
         node-version-file: '.nvmrc'
@@ -103,6 +109,9 @@ jobs:
     - uses: actions/checkout@v7
       with:
         submodules: recursive
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
     - uses: actions/setup-node@v7
       with:
         node-version-file: '.nvmrc'
@@ -132,11 +141,14 @@ jobs:
     - uses: actions/checkout@v7
       with:
         submodules: recursive
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
     - uses: actions/setup-node@v7
       with:
         node-version-file: '.nvmrc'
     - name: Build it
-      run: make VERBOSE=1
+      run: make VERBOSE=1 TJS_ZIG_TARGET=x86_64-linux-musl
     - name: Download esbuild
       run: ./build/tjs bundle tests/helpers/bundle-input.js /tmp/warm.js && rm -f /tmp/warm.js
     - name: Test it
@@ -156,6 +168,9 @@ jobs:
     - uses: actions/checkout@v7
       with:
         submodules: recursive
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
     - name: Setup vcpkg
       uses: lukka/run-vcpkg@v11
       with:
@@ -164,7 +179,7 @@ jobs:
       run: vcpkg install libffi:x64-windows-static
     - name: Configure
       run: |
-        cmake -B build -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DBUILD_WITH_MIMALLOC=${{ matrix.mimalloc }}
+        cmake -B build -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DBUILD_WITH_MIMALLOC=${{ matrix.mimalloc }} -DTJS_ZIG_TARGET=x86_64-windows-msvc
     - name: Build
       run: cmake --build build --config ${{ matrix.buildType }}
     - name: Download esbuild
@@ -189,6 +204,9 @@ jobs:
     - uses: actions/checkout@v7
       with:
         submodules: recursive
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
     # Cross-compile only: the runner can't execute an arm64 binary, so this
     # guards against the Android build regressing, not against runtime behaviour.
     # API 28 is the floor (libuv uses posix_spawn); FFI is off (the NDK ships no
@@ -214,6 +232,9 @@ jobs:
     - uses: actions/checkout@v7
       with:
         submodules: recursive
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
     - uses: actions/setup-node@v7
       with:
         node-version-file: '.nvmrc'
@@ -238,6 +259,9 @@ jobs:
     - uses: actions/checkout@v7
       with:
         submodules: recursive
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
     - uses: actions/setup-node@v7
       with:
         node-version-file: '.nvmrc'
@@ -259,6 +283,9 @@ jobs:
     - uses: actions/checkout@v7
       with:
         submodules: recursive
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
     - name: Setup vcpkg
       uses: lukka/run-vcpkg@v11
       with:
@@ -267,7 +294,7 @@ jobs:
       run: vcpkg install libffi:x64-windows-static
     - name: Configure
       run: |
-        cmake -B build -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DBUILD_WITH_MIMALLOC=OFF -DBUILD_WITH_ASAN=ON
+        cmake -B build -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DBUILD_WITH_MIMALLOC=OFF -DBUILD_WITH_ASAN=ON -DTJS_ZIG_TARGET=x86_64-windows-msvc
     - name: Build
       run: cmake --build build --config RelWithDebInfo
     - name: Download esbuild
@@ -296,6 +323,9 @@ jobs:
     - uses: actions/checkout@v7
       with:
         submodules: recursive
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
     - uses: actions/setup-node@v7
       with:
         node-version-file: '.nvmrc'
@@ -320,6 +350,9 @@ jobs:
     - uses: actions/checkout@v7
       with:
         submodules: recursive
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
     - uses: actions/setup-node@v7
       with:
         node-version-file: '.nvmrc'
@@ -351,6 +384,9 @@ jobs:
     - uses: actions/checkout@v7
       with:
         submodules: recursive
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
     - uses: actions/setup-node@v7
       with:
         node-version-file: '.nvmrc'
