@@ -33,6 +33,13 @@
 
 static JSClassID tjs_sqlite3_class_id;
 
+static JSValue tjs_sqlite3_new_integer(JSContext *ctx, int64_t value) {
+    if (value < -INT64_C(9007199254740991) || value > INT64_C(9007199254740991)) {
+        return JS_NewBigInt64(ctx, value);
+    }
+    return JS_NewInt64(ctx, value);
+}
+
 typedef struct {
     sqlite3 *handle;
     uv_mutex_t mutex;
@@ -491,7 +498,7 @@ static JSValue tjs__stmt2obj(JSContext *ctx, TJSSqlite3Stmt *h) {
 
         switch (sqlite3_column_type(h->stmt, i)) {
             case SQLITE_INTEGER: {
-                value = JS_NewInt64(ctx, sqlite3_column_int64(h->stmt, i));
+                value = tjs_sqlite3_new_integer(ctx, sqlite3_column_int64(h->stmt, i));
                 break;
             }
             case SQLITE_FLOAT: {
@@ -1151,7 +1158,7 @@ static JSValue tjs_sqlite3_async_rows_to_js(JSContext *ctx, const TJSSqlite3Asyn
                     value = JS_NULL;
                     break;
                 case TJS_SQLITE3_VALUE_INTEGER:
-                    value = JS_NewInt64(ctx, raw->value.integer);
+                    value = tjs_sqlite3_new_integer(ctx, raw->value.integer);
                     break;
                 case TJS_SQLITE3_VALUE_FLOAT:
                     value = JS_NewFloat64(ctx, raw->value.number);
