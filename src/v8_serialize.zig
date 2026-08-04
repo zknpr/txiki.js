@@ -312,6 +312,7 @@ pub fn Serializer(comptime Delegate: type) type {
         object_shape_cache: ObjectShapeCache = .{},
         next_id: u32 = 0,
         recursion_depth: u32 = 0,
+        identity_map_reservation_done: bool = false,
         plain_object_class_id: c.JSClassID,
 
         treat_array_buffer_views_as_host_objects: bool = false,
@@ -800,16 +801,17 @@ pub fn Serializer(comptime Delegate: type) type {
                         c.JS_TAG_FLOAT64 => try self.writeHeapNumber(item),
                         else => try self.writeObject(item),
                     }
-                    if (self.recursion_depth == 1 and i + 1 == identity_sample_size and length >= 4096) {
+                    if (!self.identity_map_reservation_done and i + 1 == identity_sample_size and length >= 4096) {
                         const sample_new_ids = self.next_id - identity_sample_start;
                         const estimated_ids = @as(u64, sample_new_ids) * length / identity_sample_size + 1;
                         // Sample after normal serialization so repeated-reference
-                        // arrays do not trigger a large speculative allocation.
+                        // arrays do not trigger or consume the one allowed reserve.
                         if (sample_new_ids >= identity_sample_size / 2 and
                             estimated_ids <= 1_000_000 and
                             estimated_ids > self.id_map.count())
                         {
                             try self.id_map.ensureTotalCapacity(self.ac, @intCast(estimated_ids));
+                            self.identity_map_reservation_done = true;
                         }
                     }
                 }

@@ -9,6 +9,7 @@ const BLOB_BYTES = Number(tjs.env.TJS_V8_BENCH_BLOB_BYTES ?? 32);
 const INCLUDE_BLOBS = tjs.env.TJS_V8_BENCH_DISABLE_BLOBS !== '1';
 const INCLUDE_BIGINTS = tjs.env.TJS_V8_BENCH_DISABLE_BIGINTS !== '1';
 const SERIALIZE_ONLY = tjs.env.TJS_V8_BENCH_SERIALIZE_ONLY === '1';
+const BENCH_SHAPE = tjs.env.TJS_V8_BENCH_SHAPE ?? 'both';
 const MAX_SERIALIZE_MS = tjs.env.TJS_V8_BENCH_MAX_SERIALIZE_MS === undefined
     ? undefined
     : Number(tjs.env.TJS_V8_BENCH_MAX_SERIALIZE_MS);
@@ -21,6 +22,9 @@ if (!Number.isSafeInteger(ROUNDS) || ROUNDS < 1) {
 }
 if (!Number.isSafeInteger(BLOB_BYTES) || BLOB_BYTES < 0) {
     throw new RangeError('TJS_V8_BENCH_BLOB_BYTES must be a non-negative safe integer');
+}
+if (![ 'bare', 'envelope', 'both' ].includes(BENCH_SHAPE)) {
+    throw new RangeError('TJS_V8_BENCH_SHAPE must be bare, envelope, or both');
 }
 
 function buildRows(count) {
@@ -59,7 +63,7 @@ function median(values) {
     return sorted[Math.floor(sorted.length / 2)];
 }
 
-function validateDecoded(rows, decoded) {
+function validateRows(rows, decoded) {
     assert.eq(decoded.length, rows.length);
 
     for (const index of [ 0, Math.floor(rows.length / 2), rows.length - 1 ]) {
@@ -81,50 +85,100 @@ function validateDecoded(rows, decoded) {
 
 const rows = buildRows(ROW_COUNT);
 const warmupRows = rows.slice(0, WARMUP_ROWS);
-if (SERIALIZE_ONLY) {
-    serialize(warmupRows);
-} else {
-    validateDecoded(warmupRows, deserialize(serialize(warmupRows)));
+const columns = [ 'id', 'groupId', 'timestamp', 'score', 'kind', 'source', 'message', 'sequence', 'payload' ];
+
+function makeEnvelope(values) {
+    return {
+        id: 7,
+        result: {
+            columns,
+            values,
+            rowCount: values.length,
+        },
+    };
+}
+
+function validateDecoded(shape, expectedRows, decoded) {
+    if (shape === 'bare') {
+        validateRows(expectedRows, decoded);
+        return;
+    }
+
+    assert.eq(decoded.id, 7);
+    assert.eq(decoded.result.rowCount, expectedRows.length);
+    assert.deepEqual(decoded.result.columns, columns);
+    validateRows(expectedRows, decoded.result.values);
+}
+
+const allCases = [
+    { shape: 'bare', payload: rows, warmupPayload: warmupRows },
+    { shape: 'envelope', payload: makeEnvelope(rows), warmupPayload: makeEnvelope(warmupRows) },
+];
+const cases = BENCH_SHAPE === 'both'
+    ? allCases
+    : allCases.filter(benchmarkCase => benchmarkCase.shape === BENCH_SHAPE);
+
+for (const benchmarkCase of cases) {
+    if (SERIALIZE_ONLY) {
+        serialize(benchmarkCase.warmupPayload);
+    } else {
+        validateDecoded(benchmarkCase.shape, warmupRows,
+            deserialize(serialize(benchmarkCase.warmupPayload)));
+    }
 }
 tjs.engine.gc.run();
 
-const serializeTimes = [];
-const deserializeTimes = [];
-let outputBytes = 0;
+const measurements = new Map(cases.map(benchmarkCase => [ benchmarkCase.shape, {
+    bytes: 0,
+    serializeTimes: [],
+    deserializeTimes: [],
+} ]));
 
 for (let round = 0; round < ROUNDS; round++) {
-    tjs.engine.gc.run();
-    const serializeStart = performance.now();
-    let encoded = serialize(rows);
-    const serializeMs = performance.now() - serializeStart;
-    outputBytes = encoded.byteLength;
+    // Alternate order so thermal or GC drift cannot consistently favor one shape.
+    const orderedCases = round % 2 === 0 ? cases : cases.slice().reverse();
+    for (const benchmarkCase of orderedCases) {
+        const measurement = measurements.get(benchmarkCase.shape);
+        tjs.engine.gc.run();
+        const serializeStart = performance.now();
+        let encoded = serialize(benchmarkCase.payload);
+        const serializeMs = performance.now() - serializeStart;
+        measurement.bytes = encoded.byteLength;
 
-    let decoded;
-    let deserializeMs = 0;
-    if (!SERIALIZE_ONLY) {
-        const deserializeStart = performance.now();
-        decoded = deserialize(encoded);
-        deserializeMs = performance.now() - deserializeStart;
-        validateDecoded(rows, decoded);
-        deserializeTimes.push(deserializeMs);
+        let decoded;
+        let deserializeMs = 0;
+        if (!SERIALIZE_ONLY) {
+            const deserializeStart = performance.now();
+            decoded = deserialize(encoded);
+            deserializeMs = performance.now() - deserializeStart;
+            validateDecoded(benchmarkCase.shape, rows, decoded);
+            measurement.deserializeTimes.push(deserializeMs);
+        }
+
+        measurement.serializeTimes.push(serializeMs);
+        console.log(`shape=${benchmarkCase.shape} round=${round + 1} serialize_ms=${serializeMs.toFixed(3)} deserialize_ms=${deserializeMs.toFixed(3)} bytes=${measurement.bytes}`);
+
+        encoded = undefined;
+        decoded = undefined;
+        tjs.engine.gc.run();
     }
-
-    serializeTimes.push(serializeMs);
-    console.log(`round=${round + 1} serialize_ms=${serializeMs.toFixed(3)} deserialize_ms=${deserializeMs.toFixed(3)} bytes=${outputBytes}`);
-
-    encoded = undefined;
-    decoded = undefined;
-    tjs.engine.gc.run();
 }
 
+const results = cases.map(benchmarkCase => {
+    const measurement = measurements.get(benchmarkCase.shape);
+    return {
+        shape: benchmarkCase.shape,
+        bytes: measurement.bytes,
+        serializeMs: Number(median(measurement.serializeTimes).toFixed(3)),
+        deserializeMs: SERIALIZE_ONLY ? null : Number(median(measurement.deserializeTimes).toFixed(3)),
+        serializeRunsMs: measurement.serializeTimes.map(value => Number(value.toFixed(3))),
+        deserializeRunsMs: measurement.deserializeTimes.map(value => Number(value.toFixed(3))),
+    };
+});
 const result = {
     rows: ROW_COUNT,
     rounds: ROUNDS,
-    bytes: outputBytes,
-    serializeMs: Number(median(serializeTimes).toFixed(3)),
-    deserializeMs: SERIALIZE_ONLY ? null : Number(median(deserializeTimes).toFixed(3)),
-    serializeRunsMs: serializeTimes.map(value => Number(value.toFixed(3))),
-    deserializeRunsMs: deserializeTimes.map(value => Number(value.toFixed(3))),
+    results,
 };
 
 console.log(JSON.stringify(result));
@@ -133,6 +187,8 @@ if (MAX_SERIALIZE_MS !== undefined) {
     if (!Number.isFinite(MAX_SERIALIZE_MS) || MAX_SERIALIZE_MS <= 0) {
         throw new RangeError('TJS_V8_BENCH_MAX_SERIALIZE_MS must be a positive number');
     }
-    assert.ok(result.serializeMs <= MAX_SERIALIZE_MS,
-        `serialize median ${result.serializeMs} ms exceeds ${MAX_SERIALIZE_MS} ms`);
+    for (const shapeResult of results) {
+        assert.ok(shapeResult.serializeMs <= MAX_SERIALIZE_MS,
+            `${shapeResult.shape} serialize median ${shapeResult.serializeMs} ms exceeds ${MAX_SERIALIZE_MS} ms`);
+    }
 }
