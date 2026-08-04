@@ -190,6 +190,15 @@ fn jsSerializerSetTreatArrayBufferViewsAsHostObjects(ctx: ?*c.JSContext, this_va
     return z.JS_UNDEFINED;
 }
 
+fn jsSerializerSetUseDefaultHostObjectWriter(ctx: ?*c.JSContext, this_val: c.JSValueConst, argc: c_int, argv: [*c]c.JSValueConst) callconv(.c) c.JSValue {
+    const ser = getSerializer(ctx, this_val) orelse return z.JS_EXCEPTION;
+    if (argc < 1) return c.JS_ThrowTypeError(ctx, "Not enough arguments");
+    const mode = c.JS_ToBool(ctx, argv[0]);
+    if (mode < 0) return z.JS_EXCEPTION;
+    ser.setUseDefaultHostObjectWriter(mode == cTRUE);
+    return z.JS_UNDEFINED;
+}
+
 fn jsSerializerWriteDouble(ctx: ?*c.JSContext, this_val: c.JSValueConst, argc: c_int, argv: [*c]c.JSValueConst) callconv(.c) c.JSValue {
     const ser = getSerializer(ctx, this_val) orelse return z.JS_EXCEPTION;
     if (argc < 1) return c.JS_ThrowTypeError(ctx, "Not enough arguments");
@@ -266,6 +275,7 @@ const serializer_proto_funcs = [_]c.JSCFunctionListEntry{
     z.JS_CFUNC_DEF("writeDouble", 1, jsSerializerWriteDouble),
     z.JS_CFUNC_DEF("writeRawBytes", 1, jsSerializerWriteRawBytes),
     z.JS_CFUNC_DEF("_setTreatArrayBufferViewsAsHostObjects", 1, jsSerializerSetTreatArrayBufferViewsAsHostObjects),
+    z.JS_CFUNC_DEF("_setUseDefaultHostObjectWriter", 1, jsSerializerSetUseDefaultHostObjectWriter),
 };
 
 fn jsDeserializerConstructor(ctx: ?*c.JSContext, new_target: c.JSValueConst, argc: c_int, argv: [*c]c.JSValueConst) callconv(.c) c.JSValue {

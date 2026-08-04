@@ -256,6 +256,50 @@ const SerializedObject = struct {
     retained: c.JSValue,
 };
 
+const CachedObjectProperty = struct {
+    atom: c.JSAtom,
+    encoded_key: ?[]u8 = null,
+};
+
+const ObjectShapeCache = struct {
+    properties: std.ArrayListUnmanaged(CachedObjectProperty) = .empty,
+    valid: bool = false,
+
+    fn prepare(self: *ObjectShapeCache, allocator: std.mem.Allocator, ctx: ?*c.JSContext, props: []const c.JSPropertyEnum) !void {
+        try self.properties.ensureTotalCapacity(allocator, props.len);
+        for (props) |prop| {
+            if (!prop.is_enumerable) return;
+            self.properties.appendAssumeCapacity(.{ .atom = c.JS_DupAtom(ctx, prop.atom) });
+        }
+        self.valid = true;
+    }
+
+    fn deinit(self: *ObjectShapeCache, allocator: std.mem.Allocator, rt: ?*c.JSRuntime) void {
+        for (self.properties.items) |property| {
+            c.JS_FreeAtomRT(rt, property.atom);
+            if (property.encoded_key) |bytes| allocator.free(bytes);
+        }
+        self.properties.deinit(allocator);
+        self.* = .{};
+    }
+
+    fn matches(self: *const ObjectShapeCache, props: []const c.JSPropertyEnum) bool {
+        if (!self.valid or self.properties.items.len != props.len) return false;
+        for (self.properties.items, props) |cached, prop| {
+            if (!prop.is_enumerable or cached.atom != prop.atom) return false;
+        }
+        return true;
+    }
+
+    fn isComplete(self: *const ObjectShapeCache, properties_written: u32) bool {
+        if (!self.valid or properties_written != self.properties.items.len) return false;
+        for (self.properties.items) |property| {
+            if (property.encoded_key == null) return false;
+        }
+        return true;
+    }
+};
+
 /// A V8 compatible serializer for QuickJS values.
 pub fn Serializer(comptime Delegate: type) type {
     // XXX: comptime validate delegate type
@@ -265,11 +309,13 @@ pub fn Serializer(comptime Delegate: type) type {
         rt: ?*c.JSRuntime,
         buffer: std.ArrayListUnmanaged(u8),
         id_map: std.HashMapUnmanaged(*c.JSObject, SerializedObject, JSObjectHashContext, std.hash_map.default_max_load_percentage),
+        object_shape_cache: ObjectShapeCache = .{},
         next_id: u32 = 0,
         recursion_depth: u32 = 0,
         plain_object_class_id: c.JSClassID,
 
         treat_array_buffer_views_as_host_objects: bool = false,
+        use_default_host_object_writer: bool = false,
         has_custom_objects: bool = false,
         delegate: ?Delegate,
 
@@ -293,6 +339,7 @@ pub fn Serializer(comptime Delegate: type) type {
 
         pub fn deinit(self: *Self) void {
             self.buffer.deinit(self.ac);
+            self.object_shape_cache.deinit(self.ac, self.rt);
             var values = self.id_map.valueIterator();
             while (values.next()) |value| c.JS_FreeValueRT(self.rt, value.retained);
             self.id_map.deinit(self.ac);
@@ -305,6 +352,10 @@ pub fn Serializer(comptime Delegate: type) type {
 
         pub fn setTreatArrayBufferViewsAsHostObjects(self: *Self, mode: bool) void {
             self.treat_array_buffer_views_as_host_objects = mode;
+        }
+
+        pub fn setUseDefaultHostObjectWriter(self: *Self, mode: bool) void {
+            self.use_default_host_object_writer = mode;
         }
 
         fn writeTag(self: *Self, tag: SerializationTag) !void {
@@ -496,11 +547,14 @@ pub fn Serializer(comptime Delegate: type) type {
                 c.JS_TAG_STRING, c.JS_TAG_STRING_ROPE => try self.writeString(object),
                 c.JS_TAG_OBJECT => {
                     const p: *c.JSObject = @ptrCast(c.JS_VALUE_GET_PTR(object));
-                    const is_view = c.JS_GetTypedArrayType(object) >= 0 or c.JS_IsDataView(object);
-                    if (is_view and !self.id_map.contains(p) and !self.treat_array_buffer_views_as_host_objects) {
-                        const info = try self.getArrayBufferViewInfo(object);
-                        defer c.JS_FreeValue(self.ctx, info.buffer);
-                        try self.writeJSReceiver(info.buffer, @ptrCast(c.JS_VALUE_GET_PTR(info.buffer)));
+                    if (!self.treat_array_buffer_views_as_host_objects) {
+                        const array_type = c.JS_GetTypedArrayType(object);
+                        const is_view = array_type >= 0 or c.JS_IsDataView(object);
+                        if (is_view and !self.id_map.contains(p)) {
+                            const info = try self.getArrayBufferViewInfo(object, array_type);
+                            defer c.JS_FreeValue(self.ctx, info.buffer);
+                            try self.writeJSReceiver(info.buffer, @ptrCast(c.JS_VALUE_GET_PTR(info.buffer)));
+                        }
                     }
                     try self.writeJSReceiver(object, p);
                 },
@@ -542,20 +596,23 @@ pub fn Serializer(comptime Delegate: type) type {
             defer c.JS_FreeCStringUTF16(self.ctx, chars);
             const utf16 = chars[0..length];
 
+            // Property values in row payloads are overwhelmingly Latin-1.
+            // Tentatively encode that representation so detection and copying
+            // share one pass; roll back for the position-sensitive UTF-16 form.
+            const saved_len = self.buffer.items.len;
+            try self.writeTag(.one_byte_string);
+            try self.writeVarint(usize, length);
+            const one_byte_output = try self.reserveRawBytes(length);
             var one_byte = true;
-            for (utf16) |code_unit| {
+            for (utf16, one_byte_output) |code_unit, *byte| {
                 if (code_unit > 0xff) {
                     one_byte = false;
                     break;
                 }
+                byte.* = @intCast(code_unit);
             }
-            if (one_byte) {
-                try self.writeTag(.one_byte_string);
-                try self.writeVarint(usize, length);
-                const out = try self.reserveRawBytes(length);
-                for (utf16, out) |code_unit, *byte| byte.* = @intCast(code_unit);
-                return;
-            }
+            if (one_byte) return;
+            self.buffer.items.len = saved_len;
 
             const byte_length = length * @sizeOf(u16);
             if (byte_length > std.math.maxInt(u32)) return Error.DataCloneError;
@@ -595,8 +652,13 @@ pub fn Serializer(comptime Delegate: type) type {
                 try self.throwDataCloneError();
             }
 
+            if (c.JS_GetClassID(obj) == self.plain_object_class_id) {
+                if (try self.isHostObject(obj)) return self.writeHostObject(obj);
+                return self.writeJSObject(obj);
+            }
+
             const typed_array_type = c.JS_GetTypedArrayType(obj);
-            if (typed_array_type >= 0 or c.JS_IsDataView(obj)) return self.writeJSArrayBufferView(obj);
+            if (typed_array_type >= 0 or c.JS_IsDataView(obj)) return self.writeJSArrayBufferView(obj, typed_array_type);
             if (c.JS_IsArray(obj)) return self.writeJSArray(obj);
             if (c.JS_IsDate(obj)) return self.writeJSDate(obj);
             if (c.JS_IsRegExp(obj)) return self.writeJSRegExp(obj);
@@ -605,10 +667,6 @@ pub fn Serializer(comptime Delegate: type) type {
             if (c.JS_IsArrayBuffer(obj)) return self.writeJSArrayBuffer(obj);
             if (c.JS_IsError(obj)) return self.writeJSError(obj);
 
-            if (c.JS_GetClassID(obj) == self.plain_object_class_id) {
-                if (try self.isHostObject(obj)) return self.writeHostObject(obj);
-                return self.writeJSObject(obj);
-            }
             if (try self.isPrimitiveWrapper(obj)) return self.writeJSPrimitiveWrapper(obj);
             if (try self.isHostObject(obj)) return self.writeHostObject(obj);
             try self.throwDataCloneError();
@@ -660,35 +718,43 @@ pub fn Serializer(comptime Delegate: type) type {
             try self.writeTag(if (kind == .Array) .begin_sparse_js_array else .begin_js_object);
             if (kind == .Array) try self.writeVarint(u32, @intCast(length));
 
-            const properties_written = try self.writeJSObjectPropertiesSlow(obj, prop_enum);
+            const cache_hit = if (kind == .Object) self.object_shape_cache.matches(prop_enum) else false;
+            var candidate_cache: ObjectShapeCache = .{};
+            defer candidate_cache.deinit(self.ac, self.rt);
+            if (kind == .Object and !cache_hit) try candidate_cache.prepare(self.ac, self.ctx, prop_enum);
+
+            const properties_written = if (cache_hit)
+                try self.writeJSObjectPropertiesCached(obj)
+            else
+                try self.writeJSObjectPropertiesSlow(obj, prop_enum, if (kind == .Object) &candidate_cache else null);
 
             try self.writeTag(if (kind == .Array) .end_sparse_js_array else .end_js_object);
             try self.writeVarint(u32, properties_written);
             if (kind == .Array) try self.writeVarint(u32, @intCast(length));
-        }
 
-        fn atomArrayIndex(self: *Self, atom: c.JSAtom) !?u32 {
-            var length: usize = 0;
-            const ptr = c.JS_AtomToCStringLen(self.ctx, &length, atom) orelse return Error.JSException;
-            defer c.JS_FreeCString(self.ctx, ptr);
-            const text = ptr[0..length];
-            if (text.len == 0 or (text.len > 1 and text[0] == '0')) return null;
-            var value: u64 = 0;
-            for (text) |char| {
-                if (char < '0' or char > '9') return null;
-                value = std.math.mul(u64, value, 10) catch return null;
-                value = std.math.add(u64, value, char - '0') catch return null;
-                if (value >= std.math.maxInt(u32)) return null;
+            if (kind == .Object and !cache_hit) {
+                self.object_shape_cache.deinit(self.ac, self.rt);
+                if (candidate_cache.isComplete(properties_written)) {
+                    self.object_shape_cache = candidate_cache;
+                    candidate_cache = .{};
+                }
             }
-            return @intCast(value);
         }
 
-        fn writeArrayNonElementProps(self: *Self, arr: c.JSValue, length: u32, props: []c.JSPropertyEnum) !u32 {
+        fn denseArrayElementCount(self: *Self, props: []const c.JSPropertyEnum, length: u32) !?usize {
+            if (length > props.len) return null;
+            for (0..length) |index| {
+                const expected = c.JS_NewAtomUInt32(self.ctx, @intCast(index));
+                if (expected == c.JS_ATOM_NULL) return Error.JSException;
+                defer c.JS_FreeAtom(self.ctx, expected);
+                if (props[index].atom != expected) return null;
+            }
+            return @intCast(length);
+        }
+
+        fn writeArrayNonElementProps(self: *Self, arr: c.JSValue, props: []c.JSPropertyEnum) !u32 {
             var properties_written: u32 = 0;
             for (props) |prop| {
-                if (try self.atomArrayIndex(prop.atom)) |index| {
-                    if (index < length) continue;
-                }
                 const key = c.JS_AtomToValue(self.ctx, prop.atom);
                 try exceptionCheck(key);
                 defer c.JS_FreeValue(self.ctx, key);
@@ -718,21 +784,13 @@ pub fn Serializer(comptime Delegate: type) type {
             const props = try self.getOwnPropertyNames(obj);
             defer c.JS_FreePropertyEnum(self.ctx, props.ptr, @intCast(props.len));
 
-            var next_index: u64 = 0;
-            var dense = true;
-            for (props) |prop| {
-                if (try self.atomArrayIndex(prop.atom)) |index| {
-                    if (index < length) {
-                        if (index != next_index) dense = false;
-                        next_index = @as(u64, index) + 1;
-                    }
-                }
-            }
-            dense = dense and next_index == length;
+            const dense_element_count = try self.denseArrayElementCount(props, length);
 
-            if (dense) {
+            if (dense_element_count) |element_count| {
                 try self.writeTag(.begin_dense_js_array);
                 try self.writeVarint(u32, length);
+                const identity_sample_size: u32 = @min(length, 16);
+                const identity_sample_start = self.next_id;
                 for (0..length) |i| {
                     const item = c.JS_GetPropertyUint32(self.ctx, obj, @intCast(i));
                     try exceptionCheck(item);
@@ -742,9 +800,21 @@ pub fn Serializer(comptime Delegate: type) type {
                         c.JS_TAG_FLOAT64 => try self.writeHeapNumber(item),
                         else => try self.writeObject(item),
                     }
+                    if (self.recursion_depth == 1 and i + 1 == identity_sample_size and length >= 4096) {
+                        const sample_new_ids = self.next_id - identity_sample_start;
+                        const estimated_ids = @as(u64, sample_new_ids) * length / identity_sample_size + 1;
+                        // Sample after normal serialization so repeated-reference
+                        // arrays do not trigger a large speculative allocation.
+                        if (sample_new_ids >= identity_sample_size / 2 and
+                            estimated_ids <= 1_000_000 and
+                            estimated_ids > self.id_map.count())
+                        {
+                            try self.id_map.ensureTotalCapacity(self.ac, @intCast(estimated_ids));
+                        }
+                    }
                 }
 
-                const properties_written = try self.writeArrayNonElementProps(obj, length, props);
+                const properties_written = try self.writeArrayNonElementProps(obj, props[element_count..]);
 
                 try self.writeTag(.end_dense_js_array);
                 try self.writeVarint(u32, properties_written);
@@ -911,13 +981,12 @@ pub fn Serializer(comptime Delegate: type) type {
             try self.writeRawBytes(bytes[0..@intCast(byte_length)]);
         }
 
-        fn getArrayBufferViewInfo(self: *Self, val: c.JSValue) !struct {
+        fn getArrayBufferViewInfo(self: *Self, val: c.JSValue, array_type: c_int) !struct {
             buffer: c.JSValue,
             byte_offset: usize,
             byte_length: usize,
             tag: ArrayBufferViewTag,
         } {
-            const array_type = c.JS_GetTypedArrayType(val);
             if (array_type >= 0) {
                 var byte_offset: usize = 0;
                 var byte_length: usize = 0;
@@ -963,13 +1032,19 @@ pub fn Serializer(comptime Delegate: type) type {
             return .{ .buffer = buffer, .byte_offset = @intCast(byte_offset), .byte_length = @intCast(byte_length), .tag = .data_view };
         }
 
-        fn writeJSArrayBufferView(self: *Self, val: c.JSValue) !void {
+        fn writeJSArrayBufferView(self: *Self, val: c.JSValue, array_type: c_int) !void {
             if (self.treat_array_buffer_views_as_host_objects) {
+                if (self.use_default_host_object_writer) {
+                    const saved_len = self.buffer.items.len;
+                    errdefer self.buffer.items.len = saved_len;
+                    try self.writeTag(.host_object);
+                    return self.writeDefaultHostObject(val, array_type);
+                }
                 return self.writeHostObject(val);
             }
 
             try self.writeTag(.array_buffer_view);
-            const info = try self.getArrayBufferViewInfo(val);
+            const info = try self.getArrayBufferViewInfo(val, array_type);
             defer c.JS_FreeValue(self.ctx, info.buffer);
             if (info.byte_offset > std.math.maxInt(u32) or info.byte_length > std.math.maxInt(u32)) return Error.DataCloneError;
             try self.writeVarint(u32, @intFromEnum(info.tag));
@@ -1075,24 +1150,110 @@ pub fn Serializer(comptime Delegate: type) type {
             }
         }
 
-        fn writeJSObjectPropertiesSlow(self: *Self, obj: c.JSValue, prop_enum: []c.JSPropertyEnum) !u32 {
+        fn writeDefaultHostObject(self: *Self, val: c.JSValue, array_type: c_int) !void {
+            const info = try self.getArrayBufferViewInfo(val, array_type);
+            defer c.JS_FreeValue(self.ctx, info.buffer);
+
+            const type_index: u32 = switch (info.tag) {
+                .int8_array => 0,
+                .uint8_array => 1,
+                .uint8_clamped_array => 2,
+                .int16_array => 3,
+                .uint16_array => 4,
+                .int32_array => 5,
+                .uint32_array => 6,
+                .float32_array => 7,
+                .float64_array => 8,
+                .data_view => 9,
+                .big_int64_array => 11,
+                .big_uint64_array => 12,
+                .float16_array => 13,
+                else => return Error.DataCloneError,
+            };
+            if (info.byte_length > std.math.maxInt(u32)) return Error.DataCloneError;
+
+            var buffer_length: usize = 0;
+            const bytes = c.JS_GetArrayBuffer(self.ctx, &buffer_length, info.buffer);
+            if (bytes == null) try self.throwDataCloneErrorDetachedArrayBuffer();
+            if (info.byte_offset > buffer_length or info.byte_length > buffer_length - info.byte_offset) {
+                try self.throwDataCloneErrorDetachedArrayBuffer();
+            }
+
+            try self.writeVarint(u32, type_index);
+            try self.writeVarint(u32, @intCast(info.byte_length));
+            try self.writeRawBytes(bytes[info.byte_offset .. info.byte_offset + info.byte_length]);
+        }
+
+        fn writeJSObjectPropertiesCached(self: *Self, obj: c.JSValue) !u32 {
             var properties_written: u32 = 0;
 
-            for (prop_enum) |prop| {
-                if (prop.is_enumerable == false) continue;
-                const key = c.JS_AtomToValue(self.ctx, prop.atom);
-                defer c.JS_FreeValue(self.ctx, key);
-                const value = c.JS_GetProperty(self.ctx, obj, prop.atom);
-                try exceptionCheck(value);
+            for (self.object_shape_cache.properties.items) |property| {
+                const value = (try self.getPropertyForSerialization(obj, property.atom)) orelse continue;
                 defer c.JS_FreeValue(self.ctx, value);
 
-                // If the property is no longer found, do not serialize it.
-                // This could happen if a getter deleted the property.
-                const has_property = c.JS_HasProperty(self.ctx, obj, prop.atom);
-                if (has_property < 0) return Error.JSException;
-                if (has_property == cFALSE) continue;
+                try self.writeRawBytes(property.encoded_key.?);
+                try self.writeObject(value);
+                properties_written += 1;
+            }
 
+            return properties_written;
+        }
+
+        fn getPropertyForSerialization(self: *Self, obj: c.JSValue, atom: c.JSAtom) !?c.JSValue {
+            var descriptor: c.JSPropertyDescriptor = undefined;
+            const status = c.JS_GetOwnProperty(self.ctx, &descriptor, obj, atom);
+            if (status < 0) return Error.JSException;
+            if (status == cTRUE and descriptor.flags & c.JS_PROP_GETSET == 0) {
+                c.JS_FreeValue(self.ctx, descriptor.getter);
+                c.JS_FreeValue(self.ctx, descriptor.setter);
+                return descriptor.value;
+            }
+            if (status == cTRUE) freePropertyDescriptor(self.ctx, descriptor);
+
+            // Accessors can delete this property, and an earlier accessor can
+            // expose an inherited replacement. Preserve the ordinary
+            // GetProperty/HasProperty behavior for both cases.
+            const value = c.JS_GetProperty(self.ctx, obj, atom);
+            try exceptionCheck(value);
+            errdefer c.JS_FreeValue(self.ctx, value);
+            const has_property = c.JS_HasProperty(self.ctx, obj, atom);
+            if (has_property < 0) return Error.JSException;
+            if (has_property == cFALSE) {
+                c.JS_FreeValue(self.ctx, value);
+                return null;
+            }
+            return value;
+        }
+
+        fn writeJSObjectPropertiesSlow(
+            self: *Self,
+            obj: c.JSValue,
+            prop_enum: []c.JSPropertyEnum,
+            candidate_cache: ?*ObjectShapeCache,
+        ) !u32 {
+            var properties_written: u32 = 0;
+
+            for (prop_enum, 0..) |prop, property_index| {
+                if (prop.is_enumerable == false) continue;
+                const key = c.JS_AtomToValue(self.ctx, prop.atom);
+                try exceptionCheck(key);
+                defer c.JS_FreeValue(self.ctx, key);
+                const value = (try self.getPropertyForSerialization(obj, prop.atom)) orelse continue;
+                defer c.JS_FreeValue(self.ctx, value);
+
+                const key_start = self.buffer.items.len;
                 try self.writeObject(key);
+                if (candidate_cache) |cache| {
+                    if (cache.valid) {
+                        const encoded_key = self.buffer.items[key_start..];
+                        const key_tag: SerializationTag = @enumFromInt(encoded_key[0]);
+                        if (key_tag == .one_byte_string or key_tag == .int32 or key_tag == .uint32) {
+                            cache.properties.items[property_index].encoded_key = try self.ac.dupe(u8, encoded_key);
+                        } else {
+                            cache.valid = false;
+                        }
+                    }
+                }
                 try self.writeObject(value);
                 properties_written += 1;
             }

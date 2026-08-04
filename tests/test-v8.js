@@ -139,6 +139,87 @@ for (const expected of [ new ArrayBuffer(0), Uint8Array.from([ 1, 2, 3, 255 ]).b
 }
 
 {
+    // Node.js v24.12.0 / V8 13.6.233.17-node.37. Repeated row keys are
+    // canonical bytes, so a shape cache may not alter their placement.
+    const rows = [ { id: 1, name: 'a' }, { id: 2, name: 'b' } ];
+    const expectedHex = 'ff0f41026f22026964490222046e616d652201617b026f22026964490422046e616d652201627b02240002';
+    assert.eq(hexFromBytes(serialize(rows)), expectedHex);
+    assert.deepEqual(deserialize(bytesFromHex(expectedHex)), rows);
+}
+
+{
+    // Two-byte keys require position-dependent padding and intentionally take
+    // the uncached path. Fixture: Node.js v24.12.0 / V8 13.6.233.17-node.37.
+    const rows = [ { '\u0100': 1 }, { '\u0100': 2 } ];
+    const expectedHex = 'ff0f41026f006302000149027b016f006302000149047b01240002';
+    assert.eq(hexFromBytes(serialize(rows)), expectedHex);
+    assert.deepEqual(deserialize(bytesFromHex(expectedHex)), rows);
+}
+
+{
+    const rows = [
+        { id: 1, name: 'a' },
+        { name: 'b', id: 2 },
+        { id: 3, extra: true, name: 'c' },
+    ];
+    const expectedHex = 'ff0f41036f22026964490222046e616d652201617b026f22046e616d652201622202696449047b026f220269644906220565787472615422046e616d652201637b03240003';
+    assert.eq(hexFromBytes(serialize(rows)), expectedHex, 'shape mismatch must fall back without reusing keys');
+    assert.deepEqual(roundTrip(rows), rows);
+}
+
+{
+    const first = { id: 1, name: 'a', extra: 'kept' };
+    const second = { id: 2 };
+    Object.defineProperty(second, 'name', {
+        configurable: true,
+        enumerable: true,
+        get() {
+            delete this.extra;
+            return 'b';
+        },
+    });
+    second.extra = 'deleted';
+
+    const actual = roundTrip([ first, second ]);
+    assert.deepEqual(actual[0], first);
+    assert.eq(actual[1].id, 2);
+    assert.eq(actual[1].name, 'b');
+    assert.falsy('extra' in actual[1], 'cached shape must preserve getter deletion semantics');
+}
+
+{
+    let hostWrites = 0;
+    class TrackingSerializer extends DefaultSerializer {
+        _writeHostObject(view) {
+            hostWrites++;
+            return super._writeHostObject(view);
+        }
+    }
+
+    const serializer = new TrackingSerializer();
+    serializer.writeHeader();
+    serializer.writeValue(new Uint8Array([ 1, 2, 3 ]));
+    const bytes = serializer.releaseBuffer();
+    assert.eq(hostWrites, 1, 'DefaultSerializer subclasses retain the overridable host writer');
+    assertView(deserialize(bytes), new Uint8Array([ 1, 2, 3 ]));
+}
+
+{
+    const originalWriter = DefaultSerializer.prototype._writeHostObject;
+    let hostWrites = 0;
+    DefaultSerializer.prototype._writeHostObject = function (view) {
+        hostWrites++;
+        return originalWriter.call(this, view);
+    };
+    try {
+        assertView(roundTrip(new Uint8Array([ 4, 5, 6 ])), new Uint8Array([ 4, 5, 6 ]));
+    } finally {
+        DefaultSerializer.prototype._writeHostObject = originalWriter;
+    }
+    assert.eq(hostWrites, 1, 'serialize observes a patched DefaultSerializer host writer');
+}
+
+{
     const expected = [ 1, null, 'x' ];
     expected.extra = 42;
     const actual = roundTrip(expected);

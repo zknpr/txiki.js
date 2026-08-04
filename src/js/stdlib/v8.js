@@ -75,6 +75,8 @@ class DefaultSerializer extends Serializer {
     }
 }
 
+const defaultHostObjectWriter = DefaultSerializer.prototype._writeHostObject;
+
 class DefaultDeserializer extends Deserializer {
     _readHostObject() {
         const typeIndex = this.readUint32();
@@ -104,6 +106,12 @@ class DefaultDeserializer extends Deserializer {
 
 function serialize(value) {
     const serializer = new DefaultSerializer();
+    const writerDescriptor = Object.getOwnPropertyDescriptor(DefaultSerializer.prototype, '_writeHostObject');
+    if (writerDescriptor?.value === defaultHostObjectWriter) {
+        // The unmodified helper can emit Node's host-view bytes without three
+        // JS/native calls per view. Patched public behavior stays in JS.
+        serializer._setUseDefaultHostObjectWriter(true);
+    }
     serializer.writeHeader();
     serializer.writeValue(value);
     return serializer.releaseBuffer();
