@@ -71,7 +71,7 @@ jobs:
         run: vcpkg install libffi:x64-windows-static
       - name: Configure
         run: |
-          cmake -B build -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DTJS_ZIG_TARGET=x86_64-windows-msvc
+          cmake -B build -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DTJS_ZIG_TARGET=x86_64-windows-gnu
       - name: Build
         run: cmake --build build --config Release
       - name: Package

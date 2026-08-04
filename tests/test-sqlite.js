@@ -81,6 +81,15 @@ function testCloseWithLiveStatement() {
     stmt.finalize();
 }
 
+function testDefaultPageAndCacheSizes() {
+    const db = new Database();
+
+    assert.eq(db.prepare('PRAGMA page_size').all()[0].page_size, 8192);
+    assert.eq(db.prepare('PRAGMA cache_size').all()[0].cache_size, -16384);
+
+    db.close();
+}
+
 testTypes();
 testExistingDB();
 
@@ -96,6 +105,7 @@ await tjs.remove(newDb);
 
 testNewDbNoCreate();
 testCloseWithLiveStatement();
+testDefaultPageAndCacheSizes();
 
 function testTransactions() {
     const db = new Database();
