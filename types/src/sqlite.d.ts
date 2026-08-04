@@ -175,6 +175,11 @@ declare module 'tjs:sqlite'{
     }
     export interface Database extends Disposable {}
 
+    export interface IAsyncDatabaseOperationOptions {
+        /** Abort the operation before it starts or interrupt it while running. */
+        signal?: AbortSignal;
+    }
+
     export class AsyncDatabase {
         /**
          * Opens a SQLite database whose operations execute on the thread pool.
@@ -186,9 +191,11 @@ declare module 'tjs:sqlite'{
         constructor(dbName?: string, options?: IDatabaseOptions);
 
         /** Execute a statement, ignoring any result rows. */
+        run(sql: string, params: any, options?: IAsyncDatabaseOperationOptions): Promise<void>;
         run(sql: string, ...args: any[]): Promise<void>;
 
         /** Execute a query and return its result rows. */
+        all(sql: string, params: any, options?: IAsyncDatabaseOperationOptions): Promise<any[]>;
         all(sql: string, ...args: any[]): Promise<any[]>;
 
         /**

@@ -1,5 +1,6 @@
 import core from 'tjs:internal/core';
 const sqlite3 = core.sqlite3;
+const SQLITE_INTERRUPT = 9;
 
 let controllers;
 
@@ -217,6 +218,7 @@ class AsyncDatabase {
     #tail = Promise.resolve();
     #closing = false;
     #closePromise;
+    #activeOperation;
 
     constructor(dbName = ':memory:', options = { create: true, readOnly: false }) {
         let flags = 0;
@@ -234,37 +236,91 @@ class AsyncDatabase {
         this.#handle = sqlite3.open(dbName, flags);
     }
 
-    #enqueue(operation) {
+    #enqueue(operation, signal) {
         if (!this.#handle || this.#closing) {
             return Promise.reject(new Error('Invalid DB'));
         }
 
         const handle = this.#handle;
-        const result = this.#tail.then(() => operation(handle));
+        const result = this.#tail.then(() => {
+            if (signal) {
+                return this.#runSignalled(handle, operation, signal);
+            }
+            return operation(handle);
+        });
 
         // A rejected operation must not poison the per-connection FIFO.
         this.#tail = result.then(() => undefined, () => undefined);
         return result;
     }
 
-    run(sql, ...args) {
-        if (args.length === 1 && typeof args[0] === 'object') {
+    async #runSignalled(handle, operation, signal) {
+        if (signal.aborted) {
+            throw new Error('Aborted');
+        }
+
+        const activeOperation = { interruptOrigin: null };
+        const onAbort = () => {
+            if (!activeOperation.interruptOrigin) {
+                activeOperation.interruptOrigin = 'signal';
+            }
+            sqlite3.interrupt(handle);
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+        this.#activeOperation = activeOperation;
+
+        try {
+            return await operation(handle);
+        } catch (error) {
+            // Direct interrupt() calls retain their native SQLITE_INTERRUPT error.
+            if (activeOperation.interruptOrigin === 'signal' && error?.errno === SQLITE_INTERRUPT) {
+                throw new Error('Aborted');
+            }
+            throw error;
+        } finally {
+            signal.removeEventListener('abort', onAbort);
+            if (this.#activeOperation === activeOperation) {
+                this.#activeOperation = undefined;
+            }
+        }
+    }
+
+    #parseOperationArgs(args) {
+        let options;
+        const optionsCandidate = args[1];
+        // Preserve a legacy Uint8Array positional parameter while accepting
+        // the incumbent's run/all(sql, params, options) call shape.
+        if (args.length === 2 && optionsCandidate !== null && typeof optionsCandidate === 'object' &&
+            !(optionsCandidate instanceof Uint8Array)) {
+            options = args.pop();
+        }
+
+        if (options && args.length === 1 && args[0] === undefined) {
+            args = [];
+        } else if (args.length === 1 && typeof args[0] === 'object') {
             args = args[0];
         }
 
-        return this.#enqueue(handle => sqlite3.async_run(handle, sql, args));
+        return { params: args, signal: options?.signal };
+    }
+
+    run(sql, ...args) {
+        const { params, signal } = this.#parseOperationArgs(args);
+
+        return this.#enqueue(handle => sqlite3.async_run(handle, sql, params), signal);
     }
 
     all(sql, ...args) {
-        if (args.length === 1 && typeof args[0] === 'object') {
-            args = args[0];
-        }
+        const { params, signal } = this.#parseOperationArgs(args);
 
-        return this.#enqueue(handle => sqlite3.async_all(handle, sql, args));
+        return this.#enqueue(handle => sqlite3.async_all(handle, sql, params), signal);
     }
 
     interrupt() {
         if (this.#handle) {
+            if (this.#activeOperation && !this.#activeOperation.interruptOrigin) {
+                this.#activeOperation.interruptOrigin = 'direct';
+            }
             sqlite3.interrupt(this.#handle);
         }
     }

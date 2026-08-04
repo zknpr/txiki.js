@@ -20,11 +20,33 @@ const COMPLETING_QUERY = `
     SELECT sum(value) AS total FROM counter
 `;
 
+async function getRejection(promise, message) {
+    let error;
+    try {
+        await promise;
+    } catch (ex) {
+        error = ex;
+    }
+
+    assert.ok(error, message);
+    return error;
+}
+
+function assertAbortError(error, message) {
+    assert.ok(error instanceof Error, `${message}: rejects with Error`);
+    assert.eq(error.message, 'Aborted', `${message}: has the incumbent-compatible message`);
+    assert.ok(!('errno' in error), `${message}: does not expose SQLite errno`);
+}
+
 async function testAsyncInterruptAndRecovery() {
     const db = new AsyncDatabase();
-    const query = db.all(LONG_QUERY);
+    const controller = new AbortController();
+    const query = db.all(LONG_QUERY, [], { signal: controller.signal });
 
-    setTimeout(() => db.interrupt(), 10);
+    setTimeout(() => {
+        db.interrupt();
+        controller.abort();
+    }, 10);
 
     let error;
     try {
@@ -34,7 +56,7 @@ async function testAsyncInterruptAndRecovery() {
     }
 
     assert.ok(error, 'interrupted async query rejects');
-    assert.eq(error.errno, 9, 'interrupted async query reports SQLITE_INTERRUPT');
+    assert.eq(error.errno, 9, 'direct interrupt with a passive signal reports SQLITE_INTERRUPT');
 
     const rows = await db.all('SELECT 42 AS value');
     assert.eq(rows[0].value, 42, 'connection remains usable after interrupt');
@@ -77,6 +99,117 @@ async function testAsyncOperationsAreFifo() {
 
     assert.eq(results[6].length, 1, 'FIFO transaction leaves exactly one row');
     assert.eq(results[6][0].value, 2, 'transaction and data statements execute in submission order');
+
+    await db.close();
+}
+
+async function testPreAbortedSignalDoesNotExecute() {
+    const db = new AsyncDatabase();
+    await db.run('CREATE TABLE entries (value INTEGER)');
+
+    const controller = new AbortController();
+    controller.abort();
+
+    const error = await getRejection(
+        db.run('INSERT INTO entries VALUES (?)', [1], { signal: controller.signal }),
+        'pre-aborted operation rejects',
+    );
+    assertAbortError(error, 'pre-aborted operation');
+
+    const rows = await db.all('SELECT count(*) AS count FROM entries');
+    assert.eq(rows[0].count, 0, 'pre-aborted SQL is not executed');
+
+    await db.close();
+}
+
+async function testSignalAbortInterruptsRunningOperation() {
+    const db = new AsyncDatabase();
+    const controller = new AbortController();
+    const query = db.all(LONG_QUERY, [], { signal: controller.signal });
+
+    setTimeout(() => controller.abort(), 10);
+
+    const error = await getRejection(query, 'running signal-aborted query rejects');
+    assertAbortError(error, 'running signal-aborted query');
+
+    const rows = await db.all('SELECT 43 AS value');
+    assert.eq(rows[0].value, 43, 'connection remains usable after signal abort');
+
+    await db.close();
+}
+
+async function testQueuedAbortedSignalDoesNotExecute() {
+    const db = new AsyncDatabase();
+    await db.run('CREATE TABLE entries (value INTEGER)');
+
+    const runningController = new AbortController();
+    const running = db.all(LONG_QUERY, [], { signal: runningController.signal });
+    const queuedController = new AbortController();
+    const queued = db.run('INSERT INTO entries VALUES (?)', [1], { signal: queuedController.signal });
+
+    queuedController.abort();
+    setTimeout(() => runningController.abort(), 10);
+
+    assertAbortError(
+        await getRejection(running, 'running operation rejects after abort'),
+        'running operation',
+    );
+    assertAbortError(
+        await getRejection(queued, 'queued operation rejects after abort'),
+        'queued operation',
+    );
+
+    const rows = await db.all('SELECT count(*) AS count FROM entries');
+    assert.eq(rows[0].count, 0, 'queued pre-aborted SQL is not executed');
+
+    await db.run('INSERT INTO entries VALUES (?)', 2);
+    assert.eq((await db.all('SELECT value FROM entries'))[0].value, 2, 'FIFO continues after queued abort');
+
+    await db.close();
+}
+
+async function testSignalListenersAreRemovedOnSettle() {
+    const db = new AsyncDatabase();
+    const controller = new AbortController();
+    const { signal } = controller;
+    const listeners = new Set();
+    let additions = 0;
+    let removals = 0;
+    const addEventListener = signal.addEventListener;
+    const removeEventListener = signal.removeEventListener;
+
+    Object.defineProperties(signal, {
+        addEventListener: {
+            value(type, listener, options) {
+                if (type === 'abort') {
+                    listeners.add(listener);
+                    additions++;
+                }
+                return addEventListener.call(this, type, listener, options);
+            },
+        },
+        removeEventListener: {
+            value(type, listener, options) {
+                if (type === 'abort') {
+                    listeners.delete(listener);
+                    removals++;
+                }
+                return removeEventListener.call(this, type, listener, options);
+            },
+        },
+    });
+
+    for (let i = 0; i < 50; i++) {
+        const rows = await db.all('SELECT ? AS value', [i], { signal });
+        assert.eq(rows[0].value, i);
+    }
+
+    assert.eq(additions, 50, 'each signalled operation installs one abort listener');
+    assert.eq(removals, 50, 'each settled operation removes its abort listener');
+    assert.eq(listeners.size, 0, 'no abort listeners remain after settlement');
+
+    controller.abort();
+    assert.eq((await db.all('SELECT 44 AS value'))[0].value, 44, 'abort after settlement has no effect');
 
     await db.close();
 }
@@ -129,6 +262,10 @@ async function testQueriesWithoutCancellation() {
 await testAsyncInterruptAndRecovery();
 await testAsyncInterruptWhileCloseIsQueued();
 await testAsyncOperationsAreFifo();
+await testPreAbortedSignalDoesNotExecute();
+await testSignalAbortInterruptsRunningOperation();
+await testQueuedAbortedSignalDoesNotExecute();
+await testSignalListenersAreRemovedOnSettle();
 testSyncDeadlineAndClear();
 testSyncInterruptWithoutActiveQuery();
 await testQueriesWithoutCancellation();
