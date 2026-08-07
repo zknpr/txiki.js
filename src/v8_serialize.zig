@@ -1187,9 +1187,21 @@ pub fn Serializer(comptime Delegate: type) type {
         }
 
         fn writeJSObjectPropertiesCached(self: *Self, obj: c.JSValue) !u32 {
+            // writeObject() below can re-enter writeJSObjectOrSparseArraySlow,
+            // which deinits and replaces self.object_shape_cache on a shape
+            // mismatch — freeing the slice being iterated. Own the cache
+            // locally for the walk; on exit drop whatever a nested call
+            // installed and restore it, keeping the fast path for sibling rows.
+            const cache = self.object_shape_cache;
+            self.object_shape_cache = .{};
+            defer {
+                self.object_shape_cache.deinit(self.ac, self.rt);
+                self.object_shape_cache = cache;
+            }
+
             var properties_written: u32 = 0;
 
-            for (self.object_shape_cache.properties.items) |property| {
+            for (cache.properties.items) |property| {
                 const value = (try self.getPropertyForSerialization(obj, property.atom)) orelse continue;
                 defer c.JS_FreeValue(self.ctx, value);
 

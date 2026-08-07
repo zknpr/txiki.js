@@ -264,6 +264,11 @@ class AsyncDatabase {
             if (!activeOperation.interruptOrigin) {
                 activeOperation.interruptOrigin = 'signal';
             }
+            // interrupt() alone is not enough: SQLite clears its interrupt
+            // flag while no statement is active, discarding aborts that land
+            // before the queued request starts stepping. cancel_async marks
+            // the request itself so the worker rejects it before running.
+            sqlite3.cancel_async(handle);
             sqlite3.interrupt(handle);
         };
         signal.addEventListener('abort', onAbort, { once: true });

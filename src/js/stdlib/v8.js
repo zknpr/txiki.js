@@ -93,6 +93,9 @@ class DefaultDeserializer extends Deserializer {
 
         const byteOffset = this._readRawBytes(byteLength);
         const offset = this.buffer.byteOffset + byteOffset;
+        // Deliberate Node parity: DefaultDeserializer returns views aliasing
+        // the input buffer. Ours is a private per-message copy (OwnedInput),
+        // an exposed extent already tighter than Node's shared Buffer pool.
         if (offset % bytesPerElement === 0) {
             return new constructor(this.buffer.buffer, offset, byteLength / bytesPerElement);
         }

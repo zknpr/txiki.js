@@ -44,6 +44,7 @@ typedef struct {
     sqlite3 *handle;
     uv_mutex_t mutex;
     uint64_t query_deadline_ns;
+    uint64_t async_cancel_epoch;
     unsigned int async_refs;
     bool closing;
 } TJSSqlite3Handle;
@@ -275,6 +276,24 @@ static JSValue tjs_sqlite3_interrupt(JSContext *ctx, JSValue this_val, int argc,
     if (h->handle) {
         sqlite3_interrupt(h->handle);
     }
+    uv_mutex_unlock(&h->mutex);
+
+    return JS_UNDEFINED;
+}
+
+static JSValue tjs_sqlite3_cancel_async(JSContext *ctx, JSValue this_val, int argc, JSValue *argv) {
+    TJSSqlite3Handle *h = tjs_sqlite3_get(ctx, argv[0]);
+    if (!h) {
+        return JS_EXCEPTION;
+    }
+
+    /* sqlite3_interrupt is discarded while no statement is active (both the
+       parser and the first step clear the flag), so an interrupt delivered
+       before an async request starts stepping would be lost. Bumping the
+       epoch marks every request enqueued so far as cancelled; workers compare
+       their enqueue-time snapshot before touching SQLite. */
+    uv_mutex_lock(&h->mutex);
+    h->async_cancel_epoch++;
     uv_mutex_unlock(&h->mutex);
 
     return JS_UNDEFINED;
@@ -704,6 +723,7 @@ typedef struct {
     char *sql;
     TJSSqlite3RawValue *params;
     size_t param_count;
+    uint64_t cancel_epoch;
     bool named_params;
     bool all;
     int r;
@@ -1100,6 +1120,20 @@ static int tjs_sqlite3_async_copy_row(TJSSqlite3AsyncReq *ar, sqlite3_stmt *stmt
 static void tjs_sqlite3_async_work(uv_work_t *req) {
     TJSSqlite3AsyncReq *ar = req->data;
     sqlite3_stmt *stmt = NULL;
+    TJSSqlite3Handle *owner = ar->owner;
+
+    /* The owner and its mutex outlive every async request: see the finalizer.
+       An epoch mismatch means the caller cancelled after enqueueing this
+       request; report SQLITE_INTERRUPT without running anything, since the
+       sqlite3_interrupt that accompanied the cancel is cleared whenever no
+       statement is active. */
+    uv_mutex_lock(&owner->mutex);
+    bool cancelled = owner->async_cancel_epoch != ar->cancel_epoch;
+    uv_mutex_unlock(&owner->mutex);
+    if (cancelled) {
+        ar->r = SQLITE_INTERRUPT;
+        return;
+    }
 
     ar->r = sqlite3_prepare_v2(ar->handle, ar->sql, -1, &stmt, NULL);
     if (ar->r == SQLITE_OK) {
@@ -1272,6 +1306,7 @@ static JSValue tjs_sqlite3_async_operation(JSContext *ctx, JSValue this_val, int
     }
     h->async_refs++;
     ar->handle = h->handle;
+    ar->cancel_epoch = h->async_cancel_epoch;
     uv_mutex_unlock(&h->mutex);
 
     ar->ctx = ctx;
@@ -1387,6 +1422,7 @@ static const JSCFunctionListEntry tjs_sqlite3_funcs[] = {
     TJS_CFUNC_DEF("load_extension", 3, tjs_sqlite3_load_extension),
     TJS_CFUNC_DEF("close", 1, tjs_sqlite3_close),
     TJS_CFUNC_DEF("interrupt", 1, tjs_sqlite3_interrupt),
+    TJS_CFUNC_DEF("cancel_async", 1, tjs_sqlite3_cancel_async),
     TJS_CFUNC_DEF("set_query_deadline", 2, tjs_sqlite3_set_query_deadline),
     TJS_CFUNC_DEF("clear_query_deadline", 1, tjs_sqlite3_clear_query_deadline),
     TJS_CFUNC_DEF("async_run", 3, tjs_sqlite3_async_run),

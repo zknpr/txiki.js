@@ -168,6 +168,43 @@ async function testQueuedAbortedSignalDoesNotExecute() {
     await db.close();
 }
 
+async function testSignalAbortWhileQueuedInThreadPool() {
+    // Occupy libuv's default four-thread pool so the victim's work item is
+    // still queued (no statement active) when the abort lands. SQLite
+    // discards sqlite3_interrupt in that state, so only the request-level
+    // cancellation keeps the query from resolving with rows. With a larger
+    // UV_THREADPOOL_SIZE the victim starts stepping instead and the abort is
+    // honoured by the ordinary interrupt path, so the test still passes.
+    const blockers = Array.from({ length: 4 }, () => ({
+        db: new AsyncDatabase(),
+        controller: new AbortController(),
+    }));
+    const blocked = blockers.map(({ db, controller }) =>
+        getRejection(db.all(LONG_QUERY, [], { signal: controller.signal }), 'blocker rejects after abort'));
+
+    const victim = new AsyncDatabase();
+    const controller = new AbortController();
+    const query = victim.all(LONG_QUERY, [], { signal: controller.signal });
+
+    // Native submission happens on the microtask queue in call order, so by
+    // the time the timer fires every blocker sits ahead of the victim.
+    await new Promise(resolve => setTimeout(resolve, 10));
+    controller.abort();
+    blockers.forEach(blocker => blocker.controller.abort());
+
+    assertAbortError(
+        await getRejection(query, 'query aborted while queued rejects'),
+        'query aborted while queued',
+    );
+    await Promise.all(blocked);
+
+    const rows = await victim.all('SELECT 45 AS value');
+    assert.eq(rows[0].value, 45, 'victim connection remains usable after queued abort');
+
+    await Promise.all(blockers.map(({ db }) => db.close()));
+    await victim.close();
+}
+
 async function testSignalListenersAreRemovedOnSettle() {
     const db = new AsyncDatabase();
     const controller = new AbortController();
@@ -294,6 +331,7 @@ await testAsyncOperationsAreFifo();
 await testPreAbortedSignalDoesNotExecute();
 await testSignalAbortInterruptsRunningOperation();
 await testQueuedAbortedSignalDoesNotExecute();
+await testSignalAbortWhileQueuedInThreadPool();
 await testSignalListenersAreRemovedOnSettle();
 testSyncDeadlineAndClear();
 testSyncInterruptWithoutActiveQuery();

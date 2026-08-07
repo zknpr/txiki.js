@@ -188,6 +188,30 @@ for (const expected of [ new ArrayBuffer(0), Uint8Array.from([ 1, 2, 3, 255 ]).b
 }
 
 {
+    // A shape-mismatching object nested in a NON-last property replaces the
+    // shape cache while the cached walk of its parent row is still in flight.
+    // Fixture: Node.js v24.12.0 / V8 13.6.233.17-node.37.
+    const rows = [ { a: 0, b: 0 }, { a: { x: 1 }, b: 1 } ];
+    const expectedHex = 'ff0f41026f220161490022016249007b026f2201' +
+        '616f22017849027b0122016249027b02240002';
+    assert.eq(hexFromBytes(serialize(rows)), expectedHex, 'nested object mid-walk keeps canonical key bytes');
+    assert.deepEqual(deserialize(bytesFromHex(expectedHex)), rows);
+}
+
+{
+    // Arrays of nested objects replace the shape cache twice per row while
+    // the cached walk of the outer row is still in flight.
+    // Fixture: Node.js v24.12.0 / V8 13.6.233.17-node.37.
+    const rows = [ { a: [ { x: 1 }, { y: 2 } ], b: 1 }, { a: [ { x: 1 }, { y: 2 } ], b: 1 } ];
+    const expectedHex = 'ff0f41026f22016141026f22017849027b016f22' +
+        '017949047b0124000222016249027b026f220161' +
+        '41026f22017849027b016f22017949047b012400' +
+        '0222016249027b02240002';
+    assert.eq(hexFromBytes(serialize(rows)), expectedHex, 'nested arrays mid-walk keep canonical key bytes');
+    assert.deepEqual(deserialize(bytesFromHex(expectedHex)), rows);
+}
+
+{
     let hostWrites = 0;
     class TrackingSerializer extends DefaultSerializer {
         _writeHostObject(view) {
