@@ -218,6 +218,9 @@ static JSValue tjs_sqlite3_open(JSContext *ctx, JSValue this_val, int argc, JSVa
     JS_FreeCString(ctx, db_name);
 
     if (r != SQLITE_OK) {
+        // A handle is usually allocated even when open fails and must still be
+        // released; sqlite3_close_v2(NULL) is a harmless no-op.
+        sqlite3_close_v2(handle);
         return tjs_throw_sqlite3_errno(ctx, r);
     }
 
@@ -504,7 +507,11 @@ static JSValue tjs_sqlite3_stmt_expand(JSContext *ctx, JSValue this_val, int arg
         return JS_ThrowOutOfMemory(ctx);
     }
 
-    return JS_NewString(ctx, sql);
+    // sqlite3_expanded_sql() returns a buffer the caller owns; release it with
+    // sqlite3_free() even when JS_NewString fails (ret is then JS_EXCEPTION).
+    JSValue ret = JS_NewString(ctx, sql);
+    sqlite3_free(sql);
+    return ret;
 }
 
 static JSValue tjs__stmt2obj(JSContext *ctx, TJSSqlite3Stmt *h) {
