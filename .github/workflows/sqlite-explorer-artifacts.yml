@@ -37,11 +37,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libffi-dev
       - name: Build
+        # BUILD_WITH_STRIP / BUILD_WITH_GC_SECTIONS are read from the
+        # environment by the xoption() macro at configure time. Strip removes
+        # the symbol table and (on Linux) in-binary DWARF after linking;
+        # GC_SECTIONS compiles with -ffunction-sections/-fdata-sections and
+        # links with dead-code stripping. Neither changes the feature set,
+        # SQLite compile flags, or the Release optimization level.
         run: make TJS_ZIG_TARGET=${{ matrix.target }}
+        env:
+          BUILD_WITH_STRIP: "ON"
+          BUILD_WITH_GC_SECTIONS: "ON"
       - name: Package
         run: |
           mkdir -p artifact
           cp build/tjs artifact/tjs
+          ls -l artifact
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
@@ -70,14 +80,20 @@ jobs:
       - name: Install native dependencies
         run: vcpkg install libffi:x64-windows-static
       - name: Configure
+        # GC_SECTIONS maps to /Gy + /OPT:REF /OPT:ICF under MSVC (the Visual
+        # Studio release-template defaults). BUILD_WITH_STRIP is intentionally
+        # not set here: MSVC has no CMAKE_STRIP, and letting CMake resolve a
+        # GNU strip.exe from the runner PATH against an MSVC PE would be worse
+        # than shipping the symbol-free MSVC binary as-is.
         run: |
-          cmake -B build -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DTJS_ZIG_TARGET=x86_64-windows-gnu
+          cmake -B build -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DTJS_ZIG_TARGET=x86_64-windows-gnu -DBUILD_WITH_GC_SECTIONS=ON
       - name: Build
         run: cmake --build build --config Release
       - name: Package
         run: |
           New-Item -ItemType Directory -Path artifact | Out-Null
           Copy-Item build/Release/tjs.exe artifact/tjs.exe
+          Get-ChildItem artifact
       - uses: actions/upload-artifact@v7
         with:
           name: x86_64-windows
