@@ -271,14 +271,18 @@ static void tjs__bootstrap_core(JSContext *ctx, JSValue ns) {
     tjs__mod_text_coding_init(ctx, ns);
     tjs__mod_timers_init(ctx, ns);
     tjs__mod_udp_init(ctx, ns);
+#ifdef TJS_HAVE_ADA
     tjs__mod_url_init(ctx, ns);
+#endif
 #ifdef TJS_HAVE_WASM
     tjs__mod_wasm_init(ctx, ns);
 #endif
     tjs__mod_worker_init(ctx, ns);
     tjs__mod_hashing_init(ctx, ns);
     tjs__mod_miniz_init(ctx, ns);
+#ifdef TJS_HAVE_WEBCRYPTO
     tjs__webcrypto_init(ctx, ns);
+#endif
 #ifdef TJS_HAVE_LWS
     /* The matching polyfills capture these lazily (no bootstrap member
      * access), so their absence surfaces as a TypeError at use, not at boot. */

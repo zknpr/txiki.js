@@ -21,9 +21,14 @@ endif
 TJS=$(BUILD_DIR)/tjs
 TJSC=$(BUILD_DIR)/tjsc
 STDLIB_MODULES=$(wildcard src/js/stdlib/*.js)
+POLYFILLS_SOURCES=src/js/polyfills/*.js src/js/polyfills/**/*.js src/js/stdlib/utils.js
 ESBUILD?=npx esbuild
 ESBUILD_PARAMS_COMMON=--target=esnext --platform=neutral --format=esm --main-fields=main,module
 ESBUILD_PARAMS_MINIFY=--minify --keep-names
+POLYFILLS_URL_ON=--alias:@tjs/polyfill-url=./src/js/polyfills/url.js --alias:@tjs/worker-url=./src/js/polyfills/worker-url.js
+POLYFILLS_URL_OFF=--alias:@tjs/polyfill-url=./src/js/polyfills/noop.js --alias:@tjs/worker-url=./src/js/polyfills/worker-url-disabled.js
+POLYFILLS_WEBCRYPTO_ON=--alias:@tjs/polyfill-crypto=./src/js/polyfills/crypto/crypto.js
+POLYFILLS_WEBCRYPTO_OFF=--alias:@tjs/polyfill-crypto=./src/js/polyfills/crypto/rng.js
 TJSC_PARAMS_STIP=-s
 JS_NO_STRIP?=0
 
@@ -43,12 +48,51 @@ $(TJS): $(BUILD_DIR)/CMakeCache.txt
 $(TJSC): $(BUILD_DIR)/CMakeCache.txt
 	cmake --build $(BUILD_DIR) --target tjsc -j $(JOBS)
 
-src/bundles/js/core/polyfills.js: src/js/polyfills/*.js src/js/polyfills/**/*.js src/js/stdlib/utils.js
+src/bundles/js/core/polyfills.js: $(POLYFILLS_SOURCES)
+	@mkdir -p $(dir $@)
 	$(ESBUILD) src/js/polyfills/index.js \
 		--bundle \
 		--metafile=$@.json \
 		--outfile=$@ \
 		--external:tjs:* \
+		$(POLYFILLS_URL_ON) \
+		$(POLYFILLS_WEBCRYPTO_ON) \
+		$(ESBUILD_PARAMS_MINIFY) \
+		$(ESBUILD_PARAMS_COMMON)
+
+src/bundles/js/core/no-ada/polyfills.js: $(POLYFILLS_SOURCES)
+	@mkdir -p $(dir $@)
+	$(ESBUILD) src/js/polyfills/index.js \
+		--bundle \
+		--metafile=$@.json \
+		--outfile=$@ \
+		--external:tjs:* \
+		$(POLYFILLS_URL_OFF) \
+		$(POLYFILLS_WEBCRYPTO_ON) \
+		$(ESBUILD_PARAMS_MINIFY) \
+		$(ESBUILD_PARAMS_COMMON)
+
+src/bundles/js/core/no-webcrypto/polyfills.js: $(POLYFILLS_SOURCES)
+	@mkdir -p $(dir $@)
+	$(ESBUILD) src/js/polyfills/index.js \
+		--bundle \
+		--metafile=$@.json \
+		--outfile=$@ \
+		--external:tjs:* \
+		$(POLYFILLS_URL_ON) \
+		$(POLYFILLS_WEBCRYPTO_OFF) \
+		$(ESBUILD_PARAMS_MINIFY) \
+		$(ESBUILD_PARAMS_COMMON)
+
+src/bundles/js/core/minimal/polyfills.js: $(POLYFILLS_SOURCES)
+	@mkdir -p $(dir $@)
+	$(ESBUILD) src/js/polyfills/index.js \
+		--bundle \
+		--metafile=$@.json \
+		--outfile=$@ \
+		--external:tjs:* \
+		$(POLYFILLS_URL_OFF) \
+		$(POLYFILLS_WEBCRYPTO_OFF) \
 		$(ESBUILD_PARAMS_MINIFY) \
 		$(ESBUILD_PARAMS_COMMON)
 
@@ -60,6 +104,15 @@ src/bundles/c/core/polyfills.c: $(TJSC) src/bundles/js/core/polyfills.js
 		-n "tjs:internal/polyfills" \
 		-p tjs__ \
 		src/bundles/js/core/polyfills.js
+
+src/bundles/c/core/%/polyfills.c: $(TJSC) src/bundles/js/core/%/polyfills.js
+	@mkdir -p $(dir $@)
+	$(TJSC) -m \
+		$(TJSC_PARAMS_STIP) \
+		-o $@ \
+		-n "tjs:internal/polyfills" \
+		-p tjs__ \
+		src/bundles/js/core/$*/polyfills.js
 
 src/bundles/js/core/core.js: src/js/core/*.js src/js/core/**/*.js
 	$(ESBUILD) src/js/core/index.js \
@@ -134,7 +187,7 @@ src/bundles/c/internal/path.c: $(TJSC) src/js/internal/path.js
 		-p tjs__internal_ \
 		src/js/internal/path.js
 
-core: src/bundles/c/core/polyfills.c src/bundles/c/core/core.c src/bundles/c/core/run-main.c src/bundles/c/core/run-repl.c src/bundles/c/core/worker-bootstrap.c src/bundles/c/internal/path.c
+core: src/bundles/c/core/polyfills.c src/bundles/c/core/no-ada/polyfills.c src/bundles/c/core/no-webcrypto/polyfills.c src/bundles/c/core/minimal/polyfills.c src/bundles/c/core/core.c src/bundles/c/core/run-main.c src/bundles/c/core/run-repl.c src/bundles/c/core/worker-bootstrap.c src/bundles/c/internal/path.c
 
 # tjs:v8 has no source-level dependencies to bundle. Compile it directly so
 # the native bootstrap and its bytecode can be built before npm dependencies

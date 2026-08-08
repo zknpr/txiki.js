@@ -1,12 +1,11 @@
 import core from 'tjs:internal/core';
 import { URLPattern } from 'urlpattern-polyfill';
 
+import { registerObjectURL, revokeObjectURL } from './object-url.js';
+
 
 const NativeURL = core.URL;
 const NativeURLSearchParams = core.URLSearchParams;
-
-// Blob URL registry (must remain in JS).
-const objectURLs = new Map();
 
 // Add createObjectURL / revokeObjectURL.
 NativeURL.createObjectURL = object => {
@@ -16,18 +15,12 @@ NativeURL.createObjectURL = object => {
 
     const url = `blob:${crypto.randomUUID()}`;
 
-    objectURLs.set(url, object);
+    registerObjectURL(url, object);
 
     return url;
 };
 
-NativeURL.revokeObjectURL = url => objectURLs.delete(url);
-
-// Internal helper for trusted polyfills (e.g. Worker) that need to resolve a
-// blob: URL back to its Blob. Module-private — user code cannot reach this.
-export function getObjectURL(url) {
-    return objectURLs.get(url);
-}
+NativeURL.revokeObjectURL = revokeObjectURL;
 
 // Add Symbol.iterator to URLSearchParams.
 // entries() returns an Array from native code, so wrap it in a generator

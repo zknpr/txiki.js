@@ -212,12 +212,16 @@ void tjs__mod_udp_init(JSContext *ctx, JSValue ns);
 void tjs__mod_wasm_init(JSContext *ctx, JSValue ns);
 #endif
 void tjs__mod_worker_init(JSContext *ctx, JSValue ns);
+#ifdef TJS_HAVE_WEBCRYPTO
 void tjs__webcrypto_init(JSContext *ctx, JSValue ns);
+#endif
 #ifdef TJS_HAVE_LWS
 void tjs__mod_ws_init(JSContext *ctx, JSValue ns);
 void tjs__mod_httpserver_init(JSContext *ctx, JSValue ns);
 #endif
+#ifdef TJS_HAVE_ADA
 void tjs__mod_url_init(JSContext *ctx, JSValue ns);
+#endif
 #ifndef _WIN32
 void tjs__mod_posix_socket_init(JSContext *ctx, JSValue ns);
 #endif

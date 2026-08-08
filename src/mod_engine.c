@@ -207,6 +207,16 @@ void tjs__mod_engine_init(JSContext *ctx, JSValue ns) {
 #else
     JS_DefinePropertyValueStr(ctx, features, "sqlite", JS_FALSE, JS_PROP_C_W_E);
 #endif
+#ifdef TJS_HAVE_ADA
+    JS_DefinePropertyValueStr(ctx, features, "url", JS_TRUE, JS_PROP_C_W_E);
+#else
+    JS_DefinePropertyValueStr(ctx, features, "url", JS_FALSE, JS_PROP_C_W_E);
+#endif
+#ifdef TJS_HAVE_WEBCRYPTO
+    JS_DefinePropertyValueStr(ctx, features, "webcrypto", JS_TRUE, JS_PROP_C_W_E);
+#else
+    JS_DefinePropertyValueStr(ctx, features, "webcrypto", JS_FALSE, JS_PROP_C_W_E);
+#endif
 #ifdef TJS_HAVE_FFI
     JS_DefinePropertyValueStr(ctx, features, "ffi", JS_TRUE, JS_PROP_C_W_E);
 #else

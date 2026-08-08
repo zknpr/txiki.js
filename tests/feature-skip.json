@@ -14,6 +14,16 @@
     "test-ffi-*.js",
     "test-dispose-ffi-dlopen.js"
   ],
+  "url": [
+    "test-dispose-worker.js",
+    "test-worker-error-*.js",
+    "test-worker-self-close.js",
+    "test-worker-url.js"
+  ],
+  "webcrypto": [
+    "test-webcrypto-*.js",
+    "test-app-compile.js"
+  ],
   "lws": [
     "test-fetch*.js",
     "test-ws-*.js",

@@ -1,12 +1,9 @@
 import { getRandomValues, randomUUID } from './random.js';
-import { SubtleCrypto } from './subtle.js';
 
-const subtle = new SubtleCrypto();
 
 const crypto = Object.freeze({
     getRandomValues,
     randomUUID,
-    subtle,
 });
 
 Object.defineProperty(globalThis, 'crypto', {

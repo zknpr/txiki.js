@@ -46,11 +46,12 @@ jobs:
         # links with dead-code stripping. Neither changes the feature set,
         # SQLite compile flags, or the Release optimization level.
         #
-        # WASM / FFI / LWS are excluded: the SQLite Explorer native worker
+        # WASM / FFI / LWS / Ada / full WebCrypto are excluded: the SQLite Explorer native worker
         # imports only tjs:sqlite and tjs:v8 and talks over stdio, so WAMR,
         # libffi/dlopen and the libwebsockets+mbedTLS(TLS/X.509) stack are
-        # dead weight (and attack surface) in this artifact. mbedcrypto stays
-        # (WebCrypto backs it); SQLite and the QuickJS core are untouched.
+        # dead weight (and attack surface) in this artifact. URL parsing and
+        # SubtleCrypto are also unused; OS-backed getRandomValues/randomUUID,
+        # mbedcrypto-backed tjs:hashing, SQLite, and the QuickJS core remain.
         run: make TJS_ZIG_TARGET=${{ matrix.target }}
         env:
           BUILD_WITH_STRIP: "ON"
@@ -58,6 +59,8 @@ jobs:
           BUILD_WITH_WASM: "OFF"
           BUILD_WITH_FFI: "OFF"
           BUILD_WITH_LWS: "OFF"
+          BUILD_WITH_ADA: "OFF"
+          BUILD_WITH_WEBCRYPTO: "OFF"
       - name: Package
         run: |
           mkdir -p artifact
@@ -96,13 +99,13 @@ jobs:
         # not set here: MSVC has no CMAKE_STRIP, and letting CMake resolve a
         # GNU strip.exe from the runner PATH against an MSVC PE would be worse
         # than shipping the symbol-free MSVC binary as-is.
-        # WASM/FFI/LWS are excluded for the same reason as the unix jobs (the
-        # native worker needs only tjs:sqlite + tjs:v8 over stdio). vcpkg and
-        # the libffi install above are now vestigial (find_package(libffi)
-        # only runs under BUILD_WITH_FFI=ON) but are kept until a CI run
-        # confirms the trimmed configure on Windows; prune in a follow-up.
+        # WASM/FFI/LWS/Ada/full WebCrypto are excluded for the same reason as
+        # the unix jobs. The minimal OS-backed RNG surface remains. vcpkg and
+        # the libffi install above are now vestigial (find_package(libffi) only
+        # runs under BUILD_WITH_FFI=ON) but are kept until a CI run confirms
+        # the trimmed configure on Windows; prune in a follow-up.
         run: |
-          cmake -B build -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DTJS_ZIG_TARGET=x86_64-windows-gnu -DBUILD_WITH_GC_SECTIONS=ON -DBUILD_WITH_WASM=OFF -DBUILD_WITH_FFI=OFF -DBUILD_WITH_LWS=OFF
+          cmake -B build -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DTJS_ZIG_TARGET=x86_64-windows-gnu -DBUILD_WITH_GC_SECTIONS=ON -DBUILD_WITH_WASM=OFF -DBUILD_WITH_FFI=OFF -DBUILD_WITH_LWS=OFF -DBUILD_WITH_ADA=OFF -DBUILD_WITH_WEBCRYPTO=OFF
       - name: Build
         run: cmake --build build --config Release
       - name: Package

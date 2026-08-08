@@ -9,7 +9,7 @@ import './broadcast-channel.js';
 
 import './text-encoding.js';
 import './text-encode-transform.js';
-import './url.js';
+import '@tjs/polyfill-url';
 
 import './navigator.js';
 
@@ -22,7 +22,7 @@ import './xhr.js';
 import './fetch/polyfill.js';
 
 import './console.js';
-import './crypto/crypto.js';
+import '@tjs/polyfill-crypto';
 import './performance.js';
 import './storage.js';
 import './wasm.js';

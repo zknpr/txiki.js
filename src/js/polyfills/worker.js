@@ -1,9 +1,9 @@
+import { getWorkerObjectURL } from '@tjs/worker-url';
 import core from 'tjs:internal/core';
 
 import { getBlobParts } from './blob.js';
 import { defineEventAttribute } from './event-target';
 import { createPort, postMessageWithTransfer, DELIVER_ERROR, DELIVER_MESSAGE_ERROR } from './message-channel.js';
-import { getObjectURL } from './url.js';
 
 const _Worker = core.Worker;
 
@@ -36,17 +36,8 @@ class Worker extends EventTarget {
         super();
 
         let source;
-        let url;
-
-        try {
-            url = new URL(specifier);
-        } catch (_) {
-            // specifier is not an url
-        }
-
-        if (url && url.protocol === 'blob:') {
-            const blob = getObjectURL(specifier);
-
+        const blob = getWorkerObjectURL(specifier);
+        if (blob) {
             source = blobTextSync(blob);
         }
 

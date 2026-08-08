@@ -62,7 +62,9 @@ xoption(BUILD_WITH_UBSAN "Build with UndefinedBehaviorSanitizer" OFF)
 xoption(BUILD_WITH_GC_STRESS "Force a full GC before every JS allocation (QuickJS FORCE_GC_AT_MALLOC)" OFF)
 xoption(BUILD_WITH_WASM "If ON (default), build with WASM/WAMR support" ON)
 xoption(BUILD_WITH_SQLITE "If ON (default), build with SQLite (the tjs:sqlite module)" ON)
-xoption(BUILD_WITH_LWS "If ON (default), build the libwebsockets/mbedTLS secure network stack: fetch, WebSocket, HTTP server, tjs:tls sockets, http(s) module imports and the embedded CA store. mbedcrypto is always built (WebCrypto needs it) - OFF drops only the TLS/X.509 halves" ON)
+xoption(BUILD_WITH_ADA "If ON (default), build the Ada-backed URL and URLSearchParams globals" ON)
+xoption(BUILD_WITH_WEBCRYPTO "If ON (default), build SubtleCrypto. The OS-backed crypto.getRandomValues and crypto.randomUUID APIs remain available when OFF" ON)
+xoption(BUILD_WITH_LWS "If ON (default), build the libwebsockets/mbedTLS secure network stack: fetch, WebSocket, HTTP server, tjs:tls sockets, http(s) module imports and the embedded CA store. mbedcrypto is always built (tjs:hashing needs it) - OFF drops only the TLS/X.509 halves" ON)
 xoption(BUILD_WITH_STRIP "If ON, strip the tjs binary after linking" OFF)
 xoption(BUILD_WITH_LTO "If ON, enable link-time optimization" OFF)
 xoption(BUILD_WITH_GC_SECTIONS "If ON, compile with per-function/data sections and link with dead-code stripping" OFF)
@@ -121,6 +123,23 @@ endif()
 ### Core library / executables
 ###
 
+# The native initializers and bootstrap bytecode must be selected as one unit:
+# both URL and full WebCrypto are dereferenced while the polyfills bundle is
+# evaluated. Shipping mismatched bytecode would abort every process at boot.
+if(BUILD_WITH_ADA)
+    if(BUILD_WITH_WEBCRYPTO)
+        set(TJS_POLYFILLS_BUNDLE src/bundles/c/core/polyfills.c)
+    else()
+        set(TJS_POLYFILLS_BUNDLE src/bundles/c/core/no-webcrypto/polyfills.c)
+    endif()
+else()
+    if(BUILD_WITH_WEBCRYPTO)
+        set(TJS_POLYFILLS_BUNDLE src/bundles/c/core/no-ada/polyfills.c)
+    else()
+        set(TJS_POLYFILLS_BUNDLE src/bundles/c/core/minimal/polyfills.c)
+    endif()
+endif()
+
 add_library(tjs STATIC
     src/builtins.c
     src/error.c
@@ -145,17 +164,27 @@ add_library(tjs STATIC
     src/mod_process.c
     src/mod_miniz.c
     src/mod_streams.c
-    src/ed25519.c
-    src/webcrypto.c
     src/mod_sys.c
     src/mod_udp.c
-    src/url.c
     src/bundles/c/core/core.c
-    src/bundles/c/core/polyfills.c
+    ${TJS_POLYFILLS_BUNDLE}
     src/bundles/c/core/run-main.c
     src/bundles/c/core/run-repl.c
     src/bundles/c/core/worker-bootstrap.c
 )
+
+if(BUILD_WITH_ADA)
+    target_sources(tjs PRIVATE src/url.c)
+    target_compile_definitions(tjs PRIVATE TJS_HAVE_ADA)
+endif()
+
+if(BUILD_WITH_WEBCRYPTO)
+    target_sources(tjs PRIVATE
+        src/ed25519.c
+        src/webcrypto.c
+    )
+    target_compile_definitions(tjs PRIVATE TJS_HAVE_WEBCRYPTO)
+endif()
 
 if(BUILD_WITH_LWS)
     # The lws-backed network stack plus the pieces only it consumes: tjs:tls
@@ -437,8 +466,10 @@ set_target_properties(${_tjs_test_libs} PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}"
 )
 
-add_subdirectory(deps/ada EXCLUDE_FROM_ALL)
-target_link_libraries(tjs PUBLIC ada)
+if(BUILD_WITH_ADA)
+    add_subdirectory(deps/ada EXCLUDE_FROM_ALL)
+    target_link_libraries(tjs PUBLIC ada)
+endif()
 
 if(BUILD_WITH_WASM)
 # WAMR Configuration (interpreter only for maximum portability)
@@ -559,9 +590,8 @@ add_subdirectory(deps/mbedtls EXCLUDE_FROM_ALL)
 if(BUILD_WITH_LWS)
     target_link_libraries(tjs PUBLIC mbedtls mbedx509 mbedcrypto)
 else()
-    # WebCrypto (webcrypto.c) and the mbedTLS entropy hook (utils.c) only need
-    # the crypto half; the TLS and X.509 libraries exist solely for lws and
-    # tjs:tls.
+    # tjs:hashing and optional WebCrypto only need the crypto half; the TLS and
+    # X.509 libraries exist solely for lws and tjs:tls.
     target_link_libraries(tjs PUBLIC mbedcrypto)
 endif()
 
