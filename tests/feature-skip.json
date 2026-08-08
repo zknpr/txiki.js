@@ -9,5 +9,23 @@
     "test-dispose-database.js",
     "test-dispose-statement.js",
     "test-storage.js"
+  ],
+  "ffi": [
+    "test-ffi-*.js",
+    "test-dispose-ffi-dlopen.js"
+  ],
+  "lws": [
+    "test-fetch*.js",
+    "test-ws-*.js",
+    "test-websocketstream-*.js",
+    "test-httpserver-*.js",
+    "test-serve-*.js",
+    "test-eventsource-*.js",
+    "test-xhr-*.js",
+    "test-tls-*.js",
+    "test-import-http*.js",
+    "test-teardown-live-tls.js",
+    "test-dispose-http-server.js",
+    "test-dispose-tls.js"
   ]
 }

@@ -170,6 +170,7 @@ JSModuleDef *tjs_module_loader(JSContext *ctx, const char *module_name, void *op
     tbuf_init(ctx, &dbuf);
 
     if (strncmp(http, module_name, strlen(http)) == 0 || strncmp(https, module_name, strlen(https)) == 0) {
+#ifdef TJS_HAVE_LWS
         TJSRuntime *qrt = TJS_GetRuntime(ctx);
         r = tjs__lws_load_http(qrt, &dbuf, module_name);
         if (r != 200) {
@@ -184,6 +185,10 @@ JSModuleDef *tjs_module_loader(JSContext *ctx, const char *module_name, void *op
             goto after_load;
         }
         use_realpath = false;
+#else
+        val = JS_ThrowReferenceError(ctx, "could not load '%s': built without network support", module_name);
+        goto after_load;
+#endif
     } else {
         r = tjs__load_file(ctx, &dbuf, module_name);
         if (r != 0) {

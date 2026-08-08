@@ -179,7 +179,9 @@ void tjs__mod_engine_init(JSContext *ctx, JSValue ns) {
     JS_DefinePropertyValueStr(ctx, versions, "quickjs", JS_NewString(ctx, JS_GetVersion()), JS_PROP_C_W_E);
     JS_DefinePropertyValueStr(ctx, versions, "tjs", JS_NewString(ctx, tjs_version()), JS_PROP_C_W_E);
     JS_DefinePropertyValueStr(ctx, versions, "uv", JS_NewString(ctx, uv_version_string()), JS_PROP_C_W_E);
+#ifdef TJS_HAVE_LWS
     JS_DefinePropertyValueStr(ctx, versions, "lws", JS_NewString(ctx, lws_get_library_version()), JS_PROP_C_W_E);
+#endif
 #ifdef TJS_HAVE_WASM
     uint32_t wamr_major, wamr_minor, wamr_patch;
     wasm_runtime_get_version(&wamr_major, &wamr_minor, &wamr_patch);
@@ -204,6 +206,16 @@ void tjs__mod_engine_init(JSContext *ctx, JSValue ns) {
     JS_DefinePropertyValueStr(ctx, features, "sqlite", JS_TRUE, JS_PROP_C_W_E);
 #else
     JS_DefinePropertyValueStr(ctx, features, "sqlite", JS_FALSE, JS_PROP_C_W_E);
+#endif
+#ifdef TJS_HAVE_FFI
+    JS_DefinePropertyValueStr(ctx, features, "ffi", JS_TRUE, JS_PROP_C_W_E);
+#else
+    JS_DefinePropertyValueStr(ctx, features, "ffi", JS_FALSE, JS_PROP_C_W_E);
+#endif
+#ifdef TJS_HAVE_LWS
+    JS_DefinePropertyValueStr(ctx, features, "lws", JS_TRUE, JS_PROP_C_W_E);
+#else
+    JS_DefinePropertyValueStr(ctx, features, "lws", JS_FALSE, JS_PROP_C_W_E);
 #endif
 
     JSValue gc = JS_NewObjectProto(ctx, JS_NULL);

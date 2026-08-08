@@ -29,7 +29,9 @@
 #include "tbuf.h"
 #include "tjs.h"
 
+#ifdef TJS_HAVE_LWS
 #include <libwebsockets.h>
+#endif
 #include <mbedtls/x509_crt.h>
 #include <quickjs.h>
 #ifdef TJS_HAVE_SQLITE
@@ -106,10 +108,16 @@ struct TJSRuntime {
     } wasm_ctx;
 #endif
     struct {
+#ifdef TJS_HAVE_LWS
         struct lws_context *ctx;
         struct lws_vhost *vh_direct;
         struct lws_vhost *vh_http_proxy;
         struct lws_vhost *vh_https_proxy;
+#endif
+        /* The path/proxy members stay unconditional: run-main's precompiled
+         * bytecode calls setCookieJarPath() at startup, so the setters (and the
+         * storage they write) must exist even in a build without the network
+         * stack. */
         char **no_proxy_entries;
         int no_proxy_count;
         bool no_proxy_wildcard;
@@ -117,8 +125,10 @@ struct TJSRuntime {
         char *ca_bundle_path;
         uint8_t *ca_bundle_data;
         unsigned int ca_bundle_len;
+#ifdef TJS_HAVE_LWS
         uv_async_t keepalive;
         int active_conns;
+#endif
     } lws;
     struct {
         TJSTimer *timers;
@@ -175,7 +185,9 @@ void tjs__mod_ffi_init(JSContext *ctx, JSValue ns);
 void tjs__mod_fs_init(JSContext *ctx, JSValue ns);
 void tjs__mod_fswatch_init(JSContext *ctx, JSValue ns);
 void tjs__mod_hashing_init(JSContext *ctx, JSValue ns);
+#ifdef TJS_HAVE_LWS
 void tjs__mod_httpclient_init(JSContext *ctx, JSValue ns);
+#endif
 void tjs__mod_miniz_init(JSContext *ctx, JSValue ns);
 typedef struct TJSDecompressor TJSDecompressor;
 TJSDecompressor *tjs__decompressor_create(JSContext *ctx, const char *format);
@@ -188,8 +200,10 @@ void tjs__mod_signals_init(JSContext *ctx, JSValue ns);
 void tjs__mod_sqlite3_init(JSContext *ctx, JSValue ns);
 #endif
 void tjs__mod_streams_init(JSContext *ctx, JSValue ns);
+#ifdef TJS_HAVE_LWS
 void tjs__mod_tls_init(JSContext *ctx, JSValue ns);
 void tjs__mod_tls_cleanup(TJSRuntime *qrt);
+#endif
 void tjs__mod_sys_init(JSContext *ctx, JSValue ns);
 void tjs__mod_text_coding_init(JSContext *ctx, JSValue ns);
 void tjs__mod_timers_init(JSContext *ctx, JSValue ns);
@@ -199,8 +213,10 @@ void tjs__mod_wasm_init(JSContext *ctx, JSValue ns);
 #endif
 void tjs__mod_worker_init(JSContext *ctx, JSValue ns);
 void tjs__webcrypto_init(JSContext *ctx, JSValue ns);
+#ifdef TJS_HAVE_LWS
 void tjs__mod_ws_init(JSContext *ctx, JSValue ns);
 void tjs__mod_httpserver_init(JSContext *ctx, JSValue ns);
+#endif
 void tjs__mod_url_init(JSContext *ctx, JSValue ns);
 #ifndef _WIN32
 void tjs__mod_posix_socket_init(JSContext *ctx, JSValue ns);
@@ -239,6 +255,7 @@ void tjs__destroy_timers(TJSRuntime *qrt);
 void tjs__sab_free(void *opaque, void *ptr);
 void tjs__sab_dup(void *opaque, void *ptr);
 
+#ifdef TJS_HAVE_LWS
 extern const lws_plugin_evlib_t tjs_lws_evlib;
 
 struct lws_context *tjs__lws_get_context(JSContext *ctx);
@@ -248,6 +265,7 @@ void tjs__lws_conn_unref(JSContext *ctx);
 struct lws_vhost *tjs__lws_select_vhost(JSContext *ctx, const char *scheme, const char *hostname, int port);
 int tjs__lws_load_http(TJSRuntime *qrt, TBuf *dbuf, const char *url);
 void tjs__lws_format_host(char *buf, size_t buflen, const char *scheme, const char *host, int port);
+#endif
 
 uv_loop_t *TJS_GetLoop(TJSRuntime *qrt);
 TJSRuntime *TJS_NewRuntimeWorker(void);

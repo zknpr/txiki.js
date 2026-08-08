@@ -62,6 +62,7 @@ xoption(BUILD_WITH_UBSAN "Build with UndefinedBehaviorSanitizer" OFF)
 xoption(BUILD_WITH_GC_STRESS "Force a full GC before every JS allocation (QuickJS FORCE_GC_AT_MALLOC)" OFF)
 xoption(BUILD_WITH_WASM "If ON (default), build with WASM/WAMR support" ON)
 xoption(BUILD_WITH_SQLITE "If ON (default), build with SQLite (the tjs:sqlite module)" ON)
+xoption(BUILD_WITH_LWS "If ON (default), build the libwebsockets/mbedTLS secure network stack: fetch, WebSocket, HTTP server, tjs:tls sockets, http(s) module imports and the embedded CA store. mbedcrypto is always built (WebCrypto needs it) - OFF drops only the TLS/X.509 halves" ON)
 xoption(BUILD_WITH_STRIP "If ON, strip the tjs binary after linking" OFF)
 xoption(BUILD_WITH_LTO "If ON, enable link-time optimization" OFF)
 xoption(BUILD_WITH_GC_SECTIONS "If ON, compile with per-function/data sections and link with dead-code stripping" OFF)
@@ -122,10 +123,7 @@ endif()
 
 add_library(tjs STATIC
     src/builtins.c
-    src/cacert.c
     src/error.c
-    src/lws-evlib.c
-    src/lws-utils.c
     src/eval.c
     src/mem.c
     src/modules.c
@@ -137,9 +135,6 @@ add_library(tjs STATIC
     src/version.c
     src/vm.c
     src/worker.c
-    src/ws.c
-    src/httpclient.c
-    src/httpserver.c
     src/mod_channel.c
     src/mod_dns.c
     src/mod_engine.c
@@ -150,7 +145,6 @@ add_library(tjs STATIC
     src/mod_process.c
     src/mod_miniz.c
     src/mod_streams.c
-    src/mod_tls.c
     src/ed25519.c
     src/webcrypto.c
     src/mod_sys.c
@@ -162,6 +156,24 @@ add_library(tjs STATIC
     src/bundles/c/core/run-repl.c
     src/bundles/c/core/worker-bootstrap.c
 )
+
+if(BUILD_WITH_LWS)
+    # The lws-backed network stack plus the pieces only it consumes: tjs:tls
+    # (mbedTLS TLS sockets) and the embedded CA bundle (cacert.c, used by both
+    # lws-utils.c and mod_tls.c). The JS polyfills capture these natives
+    # lazily (const WS = core.WebSocket, no member access at bootstrap), so a
+    # build without them boots fine and fails only at use.
+    target_sources(tjs PRIVATE
+        src/cacert.c
+        src/httpclient.c
+        src/httpserver.c
+        src/lws-evlib.c
+        src/lws-utils.c
+        src/mod_tls.c
+        src/ws.c
+    )
+    target_compile_definitions(tjs PRIVATE TJS_HAVE_LWS)
+endif()
 
 if(UNIX)
     target_sources(tjs PRIVATE src/mod_posix-socket.c)
@@ -544,8 +556,16 @@ else()
 endif()
 
 add_subdirectory(deps/mbedtls EXCLUDE_FROM_ALL)
-target_link_libraries(tjs PUBLIC mbedtls mbedx509 mbedcrypto)
+if(BUILD_WITH_LWS)
+    target_link_libraries(tjs PUBLIC mbedtls mbedx509 mbedcrypto)
+else()
+    # WebCrypto (webcrypto.c) and the mbedTLS entropy hook (utils.c) only need
+    # the crypto half; the TLS and X.509 libraries exist solely for lws and
+    # tjs:tls.
+    target_link_libraries(tjs PUBLIC mbedcrypto)
+endif()
 
+if(BUILD_WITH_LWS)
 if (NOT CMAKE_BUILD_TYPE MATCHES "Debug")
     set(LWS_WITH_NO_LOGS ON CACHE BOOL "" FORCE)
 endif()
@@ -650,3 +670,4 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU")
 endif()
 target_link_libraries(tjs PUBLIC websockets)
 target_include_directories(tjs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/libwebsockets/include)
+endif()

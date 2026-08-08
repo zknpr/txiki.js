@@ -264,7 +264,9 @@ static void tjs__bootstrap_core(JSContext *ctx, JSValue ns) {
     tjs__mod_sqlite3_init(ctx, ns);
 #endif
     tjs__mod_streams_init(ctx, ns);
+#ifdef TJS_HAVE_LWS
     tjs__mod_tls_init(ctx, ns);
+#endif
     tjs__mod_sys_init(ctx, ns);
     tjs__mod_text_coding_init(ctx, ns);
     tjs__mod_timers_init(ctx, ns);
@@ -275,11 +277,15 @@ static void tjs__bootstrap_core(JSContext *ctx, JSValue ns) {
 #endif
     tjs__mod_worker_init(ctx, ns);
     tjs__mod_hashing_init(ctx, ns);
-    tjs__mod_httpclient_init(ctx, ns);
     tjs__mod_miniz_init(ctx, ns);
     tjs__webcrypto_init(ctx, ns);
+#ifdef TJS_HAVE_LWS
+    /* The matching polyfills capture these lazily (no bootstrap member
+     * access), so their absence surfaces as a TypeError at use, not at boot. */
+    tjs__mod_httpclient_init(ctx, ns);
     tjs__mod_ws_init(ctx, ns);
     tjs__mod_httpserver_init(ctx, ns);
+#endif
 #ifndef _WIN32
     tjs__mod_posix_socket_init(ctx, ns);
 #endif
@@ -575,8 +581,10 @@ TJSRuntime *TJS_NewRuntimeInternal(bool is_worker, TJSRunOptions *options) {
     /* Active native-handle self-pins (for teardown). */
     init_list_head(&qrt->handle_pins);
 
+#ifdef TJS_HAVE_LWS
     /* libwebsockets initializtion */
     tjs__lws_setup();
+#endif
 
     return qrt;
 }
@@ -678,6 +686,7 @@ void TJS_FreeRuntime(TJSRuntime *qrt) {
     /* Destroy all timers */
     tjs__destroy_timers(qrt);
 
+#ifdef TJS_HAVE_LWS
     /* Destroy lws context. Must happen before freeing the JS engine
      * so that any remaining WSI_DESTROY callbacks can release GC refs. */
     if (qrt->lws.ctx) {
@@ -685,6 +694,7 @@ void TJS_FreeRuntime(TJSRuntime *qrt) {
         qrt->lws.ctx = NULL;
         uv_close((uv_handle_t *) &qrt->lws.keepalive, NULL);
     }
+#endif
 
     for (int i = 0; i < qrt->lws.no_proxy_count; i++) {
         js_free(qrt->ctx, qrt->lws.no_proxy_entries[i]);
@@ -715,8 +725,10 @@ void TJS_FreeRuntime(TJSRuntime *qrt) {
         uv_run(&qrt->loop, UV_RUN_NOWAIT);
     }
 
+#ifdef TJS_HAVE_LWS
     /* Destroy shared TLS context. */
     tjs__mod_tls_cleanup(qrt);
+#endif
 
     /* Destroy the JS engine. */
     {
