@@ -60,8 +60,10 @@ const OwnedInput = struct {
         return owner;
     }
 
-    fn retain(self: *OwnedInput) void {
-        self.references = std.math.add(usize, self.references, 1) catch @panic("OwnedInput reference count overflow");
+    fn retain(self: *OwnedInput) std.mem.Allocator.Error!void {
+        // Refuse a new owner reference through the existing allocation-failure path;
+        // a panic would pull Zig's platform runtime into this small C-ABI archive.
+        self.references = std.math.add(usize, self.references, 1) catch return error.OutOfMemory;
     }
 
     fn release(self: *OwnedInput) void {
@@ -74,6 +76,16 @@ const OwnedInput = struct {
         }
     }
 };
+
+test "OwnedInput retain reports reference-count exhaustion" {
+    var owner = OwnedInput{
+        .allocator = std.testing.allocator,
+        .bytes = @constCast(&[_]u8{}),
+        .references = std.math.maxInt(usize),
+    };
+
+    try std.testing.expectError(error.OutOfMemory, owner.retain());
+}
 
 fn releaseOwnedInput(
     _: ?*c.JSRuntime,
@@ -1331,7 +1343,7 @@ pub fn Deserializer(comptime Delegate: type) type {
             // reference, so detaching either side cannot invalidate the other.
             const js_buffer = c.JS_NewArrayBuffer(ctx, owner.bytes.ptr, owner.bytes.len, 0, releaseOwnedInput, owner, false);
             try exceptionCheck(js_buffer);
-            owner.retain();
+            try owner.retain();
             defer c.JS_FreeValue(ctx, js_buffer);
 
             var argv = [_]c.JSValue{
@@ -1476,7 +1488,7 @@ pub fn Deserializer(comptime Delegate: type) type {
                 return copied;
             }
 
-            self.input_owner.retain();
+            try self.input_owner.retain();
             errdefer self.input_owner.release();
             const bounded = c.JS_NewArrayBuffer(
                 self.ctx,

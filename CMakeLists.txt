@@ -294,6 +294,12 @@ endif()
 set(TJS_ZIG_CACHE_DIR "${CMAKE_BINARY_DIR}/zig-cache")
 set(TJS_ZIG_GLOBAL_CACHE_DIR "${CMAKE_BINARY_DIR}/zig-global-cache")
 set(TJS_ZIG_SYSTEM_INCLUDE_ARGS)
+set(TJS_ZIG_PIC_ARGS)
+# Zig 0.16 defaults GNU/Linux archives to PIC, but not musl or Android;
+# both surrounding toolchains link tjs as a position-independent executable.
+if(TJS_ZIG_TARGET MATCHES "-linux-(musl|android)$")
+    list(APPEND TJS_ZIG_PIC_ARGS -fPIC)
+endif()
 # The GNU-target Zig archive must not parse MSVC's implicit headers; the surrounding build remains MSVC.
 if(NOT TJS_ZIG_TARGET MATCHES "-windows-gnu$")
     foreach(_tjs_system_include IN LISTS CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES)
@@ -320,6 +326,7 @@ add_custom_command(
         "-I${CMAKE_CURRENT_SOURCE_DIR}/deps/quickjs"
         "-I${CMAKE_CURRENT_SOURCE_DIR}/src"
         ${TJS_ZIG_SYSTEM_INCLUDE_ARGS}
+        ${TJS_ZIG_PIC_ARGS}
         -lc
         "-femit-bin=${TJS_ZIG_LIBRARY}"
         --cache-dir "${TJS_ZIG_CACHE_DIR}"
