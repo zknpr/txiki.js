@@ -46,6 +46,15 @@ assert.eq(typeof Deserializer, 'function');
 assert.eq(typeof DefaultSerializer, 'function');
 assert.eq(typeof DefaultDeserializer, 'function');
 
+{
+    const deserializer = new Deserializer(Uint8Array.of(0xaa, 0xbb));
+
+    assert.throws(() => deserializer._readRawBytesBuffer(1, 3), RangeError,
+        'unsupported host-view alignment throws RangeError');
+    assert.deepEqual(Array.from(deserializer.readRawBytes(1)), [ 0xaa ],
+        'unsupported host-view alignment does not consume input');
+}
+
 for (const value of [ undefined, null, false, true, 0, 1, -1, 2147483647, -2147483648, 2 ** 40, -(2 ** 40) ]) {
     assert.eq(roundTrip(value), value);
 }
