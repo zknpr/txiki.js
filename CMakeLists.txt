@@ -291,14 +291,38 @@ if(MSVC)
 else()
     set(TJS_ZIG_LIBRARY "${CMAKE_BINARY_DIR}/libtjs_v8.a")
 endif()
+set(TJS_ZIG_BUILD_LIBRARY "${TJS_ZIG_LIBRARY}")
 set(TJS_ZIG_CACHE_DIR "${CMAKE_BINARY_DIR}/zig-cache")
 set(TJS_ZIG_GLOBAL_CACHE_DIR "${CMAKE_BINARY_DIR}/zig-global-cache")
 set(TJS_ZIG_SYSTEM_INCLUDE_ARGS)
 set(TJS_ZIG_PIC_ARGS)
+set(TJS_ZIG_RUNTIME_ARGS)
+set(TJS_ZIG_POST_BUILD_COMMANDS)
 # Zig 0.16 defaults GNU/Linux archives to PIC, but not musl or Android;
 # both surrounding toolchains link tjs as a position-independent executable.
-if(TJS_ZIG_TARGET MATCHES "-linux-(musl|android)$")
+# Match optional Zig OS and ABI versions (for example linux.4.19-musl and
+# linux-android.21) without changing GNU or Windows targets.
+if(TJS_ZIG_TARGET MATCHES "-linux([.][^-]+)?-(musl|android)([.][^-]+)?$")
     list(APPEND TJS_ZIG_PIC_ARGS -fPIC)
+endif()
+# A C/C++ final link does not add Zig's compiler runtime. x86_64 macOS Debug
+# emits out-of-line stack probes, so keep their implementation in the archive.
+if(TJS_ZIG_TARGET MATCHES "^x86_64-macos([.][^-]+)?$" AND TJS_ZIG_OPTIMIZE STREQUAL "Debug")
+    list(APPEND TJS_ZIG_RUNTIME_ARGS -fcompiler-rt)
+    set(TJS_ZIG_BUILD_LIBRARY "${CMAKE_BINARY_DIR}/libtjs_v8_zig.a")
+    set(TJS_ZIG_REPACK_DIR "${CMAKE_BINARY_DIR}/tjs-v8-zig-repack")
+    # Zig 0.16 does not align the added compiler_rt.o member as ld64 requires;
+    # re-archiving the extracted objects with the platform archiver fixes that.
+    list(APPEND TJS_ZIG_POST_BUILD_COMMANDS
+        COMMAND "${CMAKE_COMMAND}" -E rm -rf "${TJS_ZIG_REPACK_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${TJS_ZIG_REPACK_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E chdir "${TJS_ZIG_REPACK_DIR}" "${CMAKE_AR}" -x "${TJS_ZIG_BUILD_LIBRARY}"
+        COMMAND "${CMAKE_COMMAND}" -E chdir "${TJS_ZIG_REPACK_DIR}" chmod 0644 libtjs_v8_zig_zcu.o compiler_rt.o
+        COMMAND "${CMAKE_COMMAND}" -E rm -f "${TJS_ZIG_LIBRARY}"
+        COMMAND "${CMAKE_AR}" rcs "${TJS_ZIG_LIBRARY}"
+            "${TJS_ZIG_REPACK_DIR}/libtjs_v8_zig_zcu.o"
+            "${TJS_ZIG_REPACK_DIR}/compiler_rt.o"
+    )
 endif()
 # The GNU-target Zig archive must not parse MSVC's implicit headers; the surrounding build remains MSVC.
 if(NOT TJS_ZIG_TARGET MATCHES "-windows-gnu$")
@@ -327,10 +351,12 @@ add_custom_command(
         "-I${CMAKE_CURRENT_SOURCE_DIR}/src"
         ${TJS_ZIG_SYSTEM_INCLUDE_ARGS}
         ${TJS_ZIG_PIC_ARGS}
+        ${TJS_ZIG_RUNTIME_ARGS}
         -lc
-        "-femit-bin=${TJS_ZIG_LIBRARY}"
+        "-femit-bin=${TJS_ZIG_BUILD_LIBRARY}"
         --cache-dir "${TJS_ZIG_CACHE_DIR}"
         --global-cache-dir "${TJS_ZIG_GLOBAL_CACHE_DIR}"
+    ${TJS_ZIG_POST_BUILD_COMMANDS}
     DEPENDS ${TJS_ZIG_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/deps/quickjs/quickjs.h"
     COMMENT "Building tjs:v8 Zig static library"
     COMMAND_EXPAND_LISTS
