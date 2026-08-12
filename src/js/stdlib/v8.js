@@ -88,6 +88,7 @@ class DefaultDeserializer extends Deserializer {
         }
 
         const buffer = this._readRawBytesBuffer(byteLength, bytesPerElement);
+
         return new constructor(buffer, 0, byteLength / bytesPerElement);
     }
 }

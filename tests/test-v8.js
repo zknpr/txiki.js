@@ -53,6 +53,10 @@ assert.eq(typeof DefaultDeserializer, 'function');
         'unsupported host-view alignment throws RangeError');
     assert.deepEqual(Array.from(deserializer.readRawBytes(1)), [ 0xaa ],
         'unsupported host-view alignment does not consume input');
+    assert.throws(() => deserializer._readRawBytesBuffer(1, 0), RangeError,
+        'zero host-view alignment throws RangeError');
+    assert.deepEqual(Array.from(deserializer.readRawBytes(1)), [ 0xbb ],
+        'zero host-view alignment does not consume input');
 }
 
 for (const value of [ undefined, null, false, true, 0, 1, -1, 2147483647, -2147483648, 2 ** 40, -(2 ** 40) ]) {

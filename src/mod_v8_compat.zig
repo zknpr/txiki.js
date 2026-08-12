@@ -387,9 +387,6 @@ fn jsDeserializerReadRawBytesBuffer(ctx: ?*c.JSContext, this_val: c.JSValueConst
     var length: u32 = undefined;
     var alignment: u32 = undefined;
     if (c.JS_ToUint32(ctx, &length, argv[0]) != 0 or c.JS_ToUint32(ctx, &alignment, argv[1]) != 0) return z.JS_EXCEPTION;
-    if (alignment != 1 and alignment != 2 and alignment != 4 and alignment != 8) {
-        return c.JS_ThrowRangeError(ctx, "Unsupported host-view alignment");
-    }
     return des.readRawBytesBuffer(@intCast(length), @intCast(alignment)) catch |err| return mapNativeError(ctx, err, "Could not read raw bytes buffer");
 }
 

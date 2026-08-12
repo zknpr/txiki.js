@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Work only in `/Users/zero/dev/.codex-worktrees/txiki.js/v8-bounded-host-views` on `agent/v8-bounded-host-views`.
+- Run from the repository root on `agent/v8-bounded-host-views`.
 - Follow repository `CLAUDE.md` and preserve initialized submodules and ignored build outputs.
 - Preserve byte-for-byte Node/V8 wire compatibility and public `tjs:v8` exports.
 - Aligned payloads get an exact-sized ArrayBuffer wrapper with no payload allocation or payload copy. Unaligned multi-byte payloads retain the existing exact-copy behavior.
@@ -19,7 +19,7 @@
 - Each aligned wrapper owns one `OwnedInput` reference. Detaching or collecting one wrapper must not invalidate siblings, the native parser, or the public full view.
 - Support at least 300 simultaneously live aligned wrappers; use a `usize` reference count.
 - Accept only alignments `1`, `2`, `4`, or `8`. Validate alignment before consuming bytes and propagate QuickJS exceptions explicitly.
-- The preserved pre-fix binary is `/Users/zero/dev/.codex-worktrees/benchmarks/tjs-v8-baseline`, SHA-256 `326e910a5b24262a7c7417cddd89e89b10b6b83b8d7943ac9ea1c5ce1fe90a5d`.
+- Set `TJS_V8_BASELINE` to the preserved pre-fix executable, whose SHA-256 must be `326e910a5b24262a7c7417cddd89e89b10b6b83b8d7943ac9ea1c5ce1fe90a5d`.
 - A repeatable candidate regression greater than 5 percent in median or p95 typed-array deserialization is not acceptable without optimization or explicit user approval.
 - Complete local correctness and performance verification before push. Open a normal ready-for-review PR, never a draft PR.
 
@@ -63,7 +63,8 @@
 - [ ] **Step 6: Record RED against the preserved pre-fix binary**
 
   ```bash
-  /Users/zero/dev/.codex-worktrees/benchmarks/tjs-v8-baseline run tests/test-v8.js
+  : "${TJS_V8_BASELINE:?set TJS_V8_BASELINE to the preserved pre-fix executable}"
+  "$TJS_V8_BASELINE" run tests/test-v8.js
   ```
 
   Expected: the first exact-extent assertion fails with `buffer.byteLength` larger than the view payload. Record that assertion as RED evidence.
