@@ -50,7 +50,7 @@ fn freePropertyDescriptor(ctx: ?*c.JSContext, descriptor: c.JSPropertyDescriptor
 const OwnedInput = struct {
     allocator: std.mem.Allocator,
     bytes: []u8,
-    references: u8 = 1,
+    references: usize = 1,
 
     fn create(allocator: std.mem.Allocator, source: []const u8) !*OwnedInput {
         const bytes = try allocator.dupe(u8, source);
@@ -61,8 +61,7 @@ const OwnedInput = struct {
     }
 
     fn retain(self: *OwnedInput) void {
-        std.debug.assert(self.references < std.math.maxInt(u8));
-        self.references += 1;
+        self.references = std.math.add(usize, self.references, 1) catch @panic("OwnedInput reference count overflow");
     }
 
     fn release(self: *OwnedInput) void {
@@ -1463,6 +1462,33 @@ pub fn Deserializer(comptime Delegate: type) type {
             const slice = self.data[self.position .. self.position + length];
             self.position += length;
             return slice;
+        }
+
+        pub fn readRawBytesBuffer(self: *Self, length: usize, alignment: usize) !c.JSValue {
+            if (alignment != 1 and alignment != 2 and alignment != 4 and alignment != 8) {
+                _ = c.JS_ThrowRangeError(self.ctx, "Unsupported host-view alignment");
+                return Error.JSException;
+            }
+            const bytes = try self.readRawBytes(length);
+            if (@intFromPtr(bytes.ptr) % alignment != 0) {
+                const copied = c.JS_NewArrayBufferCopy(self.ctx, bytes.ptr, bytes.len);
+                try exceptionCheck(copied);
+                return copied;
+            }
+
+            self.input_owner.retain();
+            errdefer self.input_owner.release();
+            const bounded = c.JS_NewArrayBuffer(
+                self.ctx,
+                @constCast(bytes.ptr),
+                bytes.len,
+                0,
+                releaseOwnedInput,
+                self.input_owner,
+                false,
+            );
+            try exceptionCheck(bounded);
+            return bounded;
         }
 
         pub fn readByte(self: *Self) !u8 {
