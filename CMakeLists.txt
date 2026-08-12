@@ -314,11 +314,11 @@ if(TJS_ZIG_TARGET MATCHES "^x86_64-macos([.][^-]+)?$" AND TJS_ZIG_OPTIMIZE STREQ
     # Zig 0.16 does not align the added compiler_rt.o member as ld64 requires;
     # re-archiving the extracted objects with the platform archiver fixes that.
     list(APPEND TJS_ZIG_POST_BUILD_COMMANDS
-        COMMAND "${CMAKE_COMMAND}" -E rm -rf "${TJS_ZIG_REPACK_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory "${TJS_ZIG_REPACK_DIR}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${TJS_ZIG_REPACK_DIR}"
         COMMAND "${CMAKE_COMMAND}" -E chdir "${TJS_ZIG_REPACK_DIR}" "${CMAKE_AR}" -x "${TJS_ZIG_BUILD_LIBRARY}"
         COMMAND "${CMAKE_COMMAND}" -E chdir "${TJS_ZIG_REPACK_DIR}" chmod 0644 libtjs_v8_zig_zcu.o compiler_rt.o
-        COMMAND "${CMAKE_COMMAND}" -E rm -f "${TJS_ZIG_LIBRARY}"
+        COMMAND "${CMAKE_COMMAND}" -E remove -f "${TJS_ZIG_LIBRARY}"
         COMMAND "${CMAKE_AR}" rcs "${TJS_ZIG_LIBRARY}"
             "${TJS_ZIG_REPACK_DIR}/libtjs_v8_zig_zcu.o"
             "${TJS_ZIG_REPACK_DIR}/compiler_rt.o"
