@@ -64,6 +64,12 @@
 
   ```bash
   : "${TJS_V8_BASELINE:?set TJS_V8_BASELINE to the preserved pre-fix executable}"
+  expected_sha256="326e910a5b24262a7c7417cddd89e89b10b6b83b8d7943ac9ea1c5ce1fe90a5d"
+  actual_sha256="$(shasum -a 256 "$TJS_V8_BASELINE" | awk '{print $1}')"
+  if [ "$actual_sha256" != "$expected_sha256" ]; then
+    echo "TJS_V8_BASELINE has an unexpected SHA-256" >&2
+    exit 1
+  fi
   "$TJS_V8_BASELINE" run tests/test-v8.js
   ```
 
