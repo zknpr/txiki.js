@@ -1486,6 +1486,7 @@ static JSValue tjs_httpserver_constructor(JSContext *ctx, JSValue new_target, in
 
     bool use_tls = JS_IsString(js_cert) && JS_IsString(js_key);
     bool want_http3 = false;
+    bool require_client_cert = false;
 
     if (use_tls) {
         const char *cert_str = JS_ToCString(ctx, js_cert);
@@ -1592,7 +1593,8 @@ static JSValue tjs_httpserver_constructor(JSContext *ctx, JSValue new_target, in
 
         /* Client certificate requirement. */
         JSValue js_request_cert = JS_GetPropertyStr(ctx, options, "requestCert");
-        if (JS_ToBool(ctx, js_request_cert)) {
+        require_client_cert = JS_ToBool(ctx, js_request_cert);
+        if (require_client_cert) {
             vhost_info.options |= LWS_SERVER_OPTION_REQUIRE_VALID_OPENSSL_CLIENT_CERT;
         }
         JS_FreeValue(ctx, js_request_cert);
@@ -1630,6 +1632,9 @@ static JSValue tjs_httpserver_constructor(JSContext *ctx, JSValue new_target, in
         qinfo.user = s;
         qinfo.vhost_name = "tjs-http-server-h3";
         qinfo.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+        if (require_client_cert) {
+            qinfo.options |= LWS_SERVER_OPTION_REQUIRE_VALID_OPENSSL_CLIENT_CERT;
+        }
         qinfo.server_ssl_cert_mem = s->ssl_cert_mem;
         qinfo.server_ssl_cert_mem_len = (unsigned int) strlen(s->ssl_cert_mem);
         qinfo.server_ssl_private_key_mem = s->ssl_key_mem;
