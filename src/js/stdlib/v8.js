@@ -6,10 +6,6 @@ function objectPrototypeToString(value) {
     return Object.prototype.toString.call(value);
 }
 
-function copy(source, destination, destinationStart, sourceStart, sourceEnd) {
-    destination.set(source.subarray(sourceStart, sourceEnd), destinationStart);
-}
-
 function arrayBufferViewTypeToIndex(view) {
     const type = objectPrototypeToString(view);
     if (type === '[object Int8Array]') return 0;
@@ -91,19 +87,9 @@ class DefaultDeserializer extends Deserializer {
             throw new Error('Host object byte length is not element-aligned');
         }
 
-        const byteOffset = this._readRawBytes(byteLength);
-        const offset = this.buffer.byteOffset + byteOffset;
-        // Deliberate Node parity: DefaultDeserializer returns views aliasing
-        // the input buffer. Ours is a private per-message copy (OwnedInput),
-        // an exposed extent already tighter than Node's shared Buffer pool.
-        if (offset % bytesPerElement === 0) {
-            return new constructor(this.buffer.buffer, offset, byteLength / bytesPerElement);
-        }
+        const buffer = this._readRawBytesBuffer(byteLength, bytesPerElement);
 
-        // Node accepts unaligned host-object payloads by copying them first.
-        const aligned = new Uint8Array(byteLength);
-        copy(this.buffer, aligned, 0, byteOffset, byteOffset + byteLength);
-        return new constructor(aligned.buffer, aligned.byteOffset, byteLength / bytesPerElement);
+        return new constructor(buffer, 0, byteLength / bytesPerElement);
     }
 }
 

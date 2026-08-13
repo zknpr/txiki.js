@@ -381,6 +381,15 @@ fn jsDeserializerReadRawBytes(ctx: ?*c.JSContext, this_val: c.JSValueConst, argc
     return c.JS_NewUint8ArrayCopy(ctx, bytes.ptr, bytes.len);
 }
 
+fn jsDeserializerReadRawBytesBuffer(ctx: ?*c.JSContext, this_val: c.JSValueConst, argc: c_int, argv: [*c]c.JSValueConst) callconv(.c) c.JSValue {
+    const des = getDeserializer(ctx, this_val) orelse return z.JS_EXCEPTION;
+    if (argc < 2) return c.JS_ThrowTypeError(ctx, "Not enough arguments");
+    var length: u32 = undefined;
+    var alignment: u32 = undefined;
+    if (c.JS_ToUint32(ctx, &length, argv[0]) != 0 or c.JS_ToUint32(ctx, &alignment, argv[1]) != 0) return z.JS_EXCEPTION;
+    return des.readRawBytesBuffer(@intCast(length), @intCast(alignment)) catch |err| return mapNativeError(ctx, err, "Could not read raw bytes buffer");
+}
+
 /// Same as `jsDeserializerReadRawBytes`, but just advanced the internal position and returns the starting offset.
 fn jsDeserializerReadRawBytes_(ctx: ?*c.JSContext, this_val: c.JSValueConst, argc: c_int, argv: [*c]c.JSValueConst) callconv(.c) c.JSValue {
     const des = getDeserializer(ctx, this_val) orelse return z.JS_EXCEPTION;
@@ -413,6 +422,7 @@ const deserializer_proto_funcs = [_]c.JSCFunctionListEntry{
     z.JS_CFUNC_DEF("readDouble", 0, jsDeserializerReadDouble),
     z.JS_CFUNC_DEF("readRawBytes", 1, jsDeserializerReadRawBytes),
     z.JS_CFUNC_DEF("_readRawBytes", 1, jsDeserializerReadRawBytes_),
+    z.JS_CFUNC_DEF("_readRawBytesBuffer", 2, jsDeserializerReadRawBytesBuffer),
     z.JS_CGETSET_DEF("buffer", jsDeserializerBufferGetter, null),
 };
 

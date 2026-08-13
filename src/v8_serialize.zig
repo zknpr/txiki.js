@@ -50,7 +50,7 @@ fn freePropertyDescriptor(ctx: ?*c.JSContext, descriptor: c.JSPropertyDescriptor
 const OwnedInput = struct {
     allocator: std.mem.Allocator,
     bytes: []u8,
-    references: u8 = 1,
+    references: usize = 1,
 
     fn create(allocator: std.mem.Allocator, source: []const u8) !*OwnedInput {
         const bytes = try allocator.dupe(u8, source);
@@ -60,9 +60,10 @@ const OwnedInput = struct {
         return owner;
     }
 
-    fn retain(self: *OwnedInput) void {
-        std.debug.assert(self.references < std.math.maxInt(u8));
-        self.references += 1;
+    fn retain(self: *OwnedInput) std.mem.Allocator.Error!void {
+        // Refuse a new owner reference through the existing allocation-failure path;
+        // a panic would pull Zig's platform runtime into this small C-ABI archive.
+        self.references = std.math.add(usize, self.references, 1) catch return error.OutOfMemory;
     }
 
     fn release(self: *OwnedInput) void {
@@ -75,6 +76,16 @@ const OwnedInput = struct {
         }
     }
 };
+
+test "OwnedInput retain reports reference-count exhaustion" {
+    var owner = OwnedInput{
+        .allocator = std.testing.allocator,
+        .bytes = @constCast(&[_]u8{}),
+        .references = std.math.maxInt(usize),
+    };
+
+    try std.testing.expectError(error.OutOfMemory, owner.retain());
+}
 
 fn releaseOwnedInput(
     _: ?*c.JSRuntime,
@@ -1332,7 +1343,7 @@ pub fn Deserializer(comptime Delegate: type) type {
             // reference, so detaching either side cannot invalidate the other.
             const js_buffer = c.JS_NewArrayBuffer(ctx, owner.bytes.ptr, owner.bytes.len, 0, releaseOwnedInput, owner, false);
             try exceptionCheck(js_buffer);
-            owner.retain();
+            try owner.retain();
             defer c.JS_FreeValue(ctx, js_buffer);
 
             var argv = [_]c.JSValue{
@@ -1463,6 +1474,33 @@ pub fn Deserializer(comptime Delegate: type) type {
             const slice = self.data[self.position .. self.position + length];
             self.position += length;
             return slice;
+        }
+
+        pub fn readRawBytesBuffer(self: *Self, length: usize, alignment: usize) !c.JSValue {
+            if (alignment != 1 and alignment != 2 and alignment != 4 and alignment != 8) {
+                _ = c.JS_ThrowRangeError(self.ctx, "Unsupported host-view alignment");
+                return Error.JSException;
+            }
+            const bytes = try self.readRawBytes(length);
+            if (@intFromPtr(bytes.ptr) % alignment != 0) {
+                const copied = c.JS_NewArrayBufferCopy(self.ctx, bytes.ptr, bytes.len);
+                try exceptionCheck(copied);
+                return copied;
+            }
+
+            try self.input_owner.retain();
+            errdefer self.input_owner.release();
+            const bounded = c.JS_NewArrayBuffer(
+                self.ctx,
+                @constCast(bytes.ptr),
+                bytes.len,
+                0,
+                releaseOwnedInput,
+                self.input_owner,
+                false,
+            );
+            try exceptionCheck(bounded);
+            return bounded;
         }
 
         pub fn readByte(self: *Self) !u8 {

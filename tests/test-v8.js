@@ -34,6 +34,9 @@ function assertNumber(actual, expected, message) {
 function assertView(actual, expected) {
     assert.is(actual.constructor, expected.constructor);
     assert.eq(actual.byteLength, expected.byteLength);
+    assert.eq(actual.buffer.byteLength, actual.byteLength,
+        'decoded host views expose only their payload through .buffer');
+    assert.eq(actual.byteOffset, 0, 'decoded host views start at offset zero');
     assert.deepEqual(Array.from(new Uint8Array(actual.buffer, actual.byteOffset, actual.byteLength)),
         Array.from(new Uint8Array(expected.buffer, expected.byteOffset, expected.byteLength)));
 }
@@ -42,6 +45,19 @@ assert.eq(typeof Serializer, 'function');
 assert.eq(typeof Deserializer, 'function');
 assert.eq(typeof DefaultSerializer, 'function');
 assert.eq(typeof DefaultDeserializer, 'function');
+
+{
+    const deserializer = new Deserializer(Uint8Array.of(0xaa, 0xbb));
+
+    assert.throws(() => deserializer._readRawBytesBuffer(1, 3), RangeError,
+        'unsupported host-view alignment throws RangeError');
+    assert.deepEqual(Array.from(deserializer.readRawBytes(1)), [ 0xaa ],
+        'unsupported host-view alignment does not consume input');
+    assert.throws(() => deserializer._readRawBytesBuffer(1, 0), RangeError,
+        'zero host-view alignment throws RangeError');
+    assert.deepEqual(Array.from(deserializer.readRawBytes(1)), [ 0xbb ],
+        'zero host-view alignment does not consume input');
+}
 
 for (const value of [ undefined, null, false, true, 0, 1, -1, 2147483647, -2147483648, 2 ** 40, -(2 ** 40) ]) {
     assert.eq(roundTrip(value), value);
@@ -98,6 +114,37 @@ for (const expected of typedArrays) {
 }
 
 {
+    const expectedFirst = new Uint8Array([ 0x11, 0x22, 0x33 ]);
+    const expectedSecond = new Uint8Array([ 0xa1, 0xb2, 0xc3, 0xd4 ]);
+    const { first, second } = roundTrip({ first: expectedFirst, second: expectedSecond });
+
+    assertView(first, expectedFirst);
+    assertView(second, expectedSecond);
+    assert.isNot(first.buffer, second.buffer, 'decoded sibling views have distinct buffers');
+
+    const widenedFirst = new Uint8Array(first.buffer);
+    widenedFirst.fill(0xee);
+    assert.deepEqual(Array.from(second), Array.from(expectedSecond),
+        'widening and mutating one decoded view cannot alter a sibling');
+
+    structuredClone(first.buffer, { transfer: [ first.buffer ] });
+    assert.eq(first.buffer.byteLength, 0, 'transferring a decoded view detaches only that view');
+    assert.deepEqual(Array.from(second), Array.from(expectedSecond),
+        'detaching one decoded view leaves its sibling readable');
+}
+
+{
+    const expected = new Uint8Array([ 0x41, 0x42, 0x43, 0x44 ]);
+    let result = roundTrip({ view: expected });
+    const survivor = result.view;
+    result = undefined;
+
+    tjs.engine.gc.run();
+    tjs.engine.gc.run();
+    assertView(survivor, expected);
+}
+
+{
     const expected = new Uint8Array([ 9, 8, 7, 6 ]);
     const actual = roundTrip(expected);
     tjs.engine.gc.run();
@@ -112,6 +159,47 @@ for (const expected of typedArrays) {
 
     const expected = new DataView(backing, 7, 8);
     assertView(roundTrip(expected), expected);
+}
+
+{
+    // The Node fixture's payload starts at byte 5, so Int16Array must take the unaligned-copy path.
+    let deserializer = new DefaultDeserializer(bytesFromHex('ff0f5c0304ffff0001'));
+    let sourceBuffer = deserializer.buffer.buffer;
+    assert.ok(deserializer.readHeader());
+    const actual = deserializer.readValue();
+    const expected = new Int16Array([ -1, 256 ]);
+
+    assertView(actual, expected);
+    assert.isNot(actual.buffer, sourceBuffer,
+        'unaligned host views copy instead of aliasing DefaultDeserializer.buffer');
+    deserializer = undefined;
+    sourceBuffer = undefined;
+    tjs.engine.gc.run();
+    tjs.engine.gc.run();
+    assertView(actual, expected);
+}
+
+{
+    // Keep the count above 255 to catch owner-reference counters that are too narrow.
+    const expected = Array.from({ length: 300 }, (_, index) => new Uint8Array([ index & 0xff ]));
+    const actual = roundTrip(expected);
+
+    assertView(actual[0], expected[0]);
+    assertView(actual[150], expected[150]);
+    assertView(actual[299], expected[299]);
+
+    const detachedIndex = 149;
+    structuredClone(actual[detachedIndex].buffer, { transfer: [ actual[detachedIndex].buffer ] });
+    assert.eq(actual[detachedIndex].buffer.byteLength, 0,
+        'one detached view does not invalidate other live owner references');
+    tjs.engine.gc.run();
+    tjs.engine.gc.run();
+
+    for (let index = 0; index < actual.length; index++) {
+        if (index !== detachedIndex) {
+            assertView(actual[index], expected[index]);
+        }
+    }
 }
 
 for (const expected of [ new ArrayBuffer(0), Uint8Array.from([ 1, 2, 3, 255 ]).buffer ]) {
