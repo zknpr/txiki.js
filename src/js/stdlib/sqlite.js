@@ -107,6 +107,10 @@ class Database {
 
             signal?.addEventListener('abort', onAbort, { once: true });
 
+            if (signal?.aborted) {
+                throw new Error('Aborted');
+            }
+
             return await sqlite3.async_all(handle, sql, params);
         } catch (error) {
             if (activeOperation.interruptOrigin === 'signal' && error?.errno === SQLITE_INTERRUPT) {
@@ -373,10 +377,15 @@ class AsyncDatabase {
             sqlite3.interrupt(handle);
         };
 
-        signal.addEventListener('abort', onAbort, { once: true });
         this.#activeOperation = activeOperation;
 
         try {
+            signal.addEventListener('abort', onAbort, { once: true });
+
+            if (signal.aborted) {
+                throw new Error('Aborted');
+            }
+
             return await operation(handle);
         } catch (error) {
             // Direct interrupt() calls retain their native SQLITE_INTERRUPT error.
@@ -386,10 +395,12 @@ class AsyncDatabase {
 
             throw error;
         } finally {
-            signal.removeEventListener('abort', onAbort);
-
-            if (this.#activeOperation === activeOperation) {
-                this.#activeOperation = undefined;
+            try {
+                signal.removeEventListener('abort', onAbort);
+            } finally {
+                if (this.#activeOperation === activeOperation) {
+                    this.#activeOperation = undefined;
+                }
             }
         }
     }

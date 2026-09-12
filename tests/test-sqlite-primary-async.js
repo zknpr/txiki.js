@@ -171,6 +171,31 @@ async function overlappingAccessFailsPromptly() {
     }
 }
 
+async function abortDuringListenerRegistrationDoesNotExecute() {
+    for (const DatabaseClass of [Database, AsyncDatabase]) {
+        const db = new DatabaseClass();
+        const query = (sql, params = [], options = {}) => db instanceof Database
+            ? db.allAsync(sql, params, options)
+            : db.all(sql, params, options);
+        const controller = new AbortController();
+        const signal = controller.signal;
+        const add = signal.addEventListener;
+
+        await query('CREATE TABLE saved(value)');
+        Object.defineProperty(signal, 'addEventListener', {
+            value(...args) {
+                add.apply(this, args);
+                controller.abort();
+            },
+        });
+        const error = await rejection(query('INSERT INTO saved VALUES (7)', [], { signal }));
+
+        assert.eq(error.message, 'Aborted', 'registration reentry cannot bypass the pre-abort check');
+        assert.eq((await query('SELECT count(*) AS n FROM saved'))[0].n, 0);
+        await db.close();
+    }
+}
+
 async function synchronousReentryCannotStartThreadedWork() {
     const db = new Database();
     const statement = db.prepare('SELECT ? AS value');
@@ -294,6 +319,7 @@ for (const test of [
     cancellationAndRecovery,
     preAbortedAndInvalidRequests,
     abortDuringParameterConversionDoesNotExecute,
+    abortDuringListenerRegistrationDoesNotExecute,
     overlappingAccessFailsPromptly,
     synchronousReentryCannotStartThreadedWork,
     garbageCollectionDoesNotBlockCancellation,
