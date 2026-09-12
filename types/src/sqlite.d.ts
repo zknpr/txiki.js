@@ -89,19 +89,32 @@ declare module 'tjs:sqlite'{
         exec(sql: string): void;
 
         /**
+         * Execute one statement on the thread pool using this same connection,
+         * preserving TEMP objects, in-memory data, and pending transactions.
+         * Result values own their storage after the returned promise settles.
+         *
+         * Only one asynchronous operation may be active. Concurrent calls and
+         * synchronous access, including prepared statements and close(), fail
+         * with SQLITE_BUSY until settlement. Await before closing the database.
+         * Calling this inside a synchronous transaction callback also rejects.
+         * Cancellation of writes follows SQLite's transaction rollback rules.
+         */
+        allAsync(sql: string, params?: any, options?: IAsyncDatabaseOperationOptions): Promise<any[]>;
+
+        /**
          * Interrupt any currently running operation on this database.
          * Calling this while no operation is running has no effect.
          */
         interrupt(): void;
 
         /**
-         * Abort synchronous queries once the given duration has elapsed.
+         * Abort queries once the given duration has elapsed, including allAsync().
          *
          * @param ms - Deadline duration in milliseconds. Must be finite and nonnegative.
          */
         setQueryDeadline(ms: number): void;
 
-        /** Disable the currently armed synchronous query deadline. */
+        /** Disable the currently armed query deadline after active work settles. */
         clearQueryDeadline(): void;
 
         /**

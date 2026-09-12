@@ -61,6 +61,14 @@ jobs:
           BUILD_WITH_LWS: "OFF"
           BUILD_WITH_ADA: "OFF"
           BUILD_WITH_WEBCRYPTO: "OFF"
+      - name: Verify SQLite and V8 contracts
+        timeout-minutes: 2
+        run: |
+          ./build/tjs run tests/test-sqlite-interrupt.js
+          ./build/tjs run tests/test-sqlite-primary-async.js
+          ./build/tjs run tests/test-dispose-database.js
+          ./build/tjs run tests/test-dispose-statement.js
+          ./build/tjs run tests/test-v8.js
       - name: Package
         run: |
           mkdir -p artifact
@@ -108,6 +116,14 @@ jobs:
           cmake -B build -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DTJS_ZIG_TARGET=x86_64-windows-gnu -DBUILD_WITH_GC_SECTIONS=ON -DBUILD_WITH_WASM=OFF -DBUILD_WITH_FFI=OFF -DBUILD_WITH_LWS=OFF -DBUILD_WITH_ADA=OFF -DBUILD_WITH_WEBCRYPTO=OFF
       - name: Build
         run: cmake --build build --config Release
+      - name: Verify SQLite and V8 contracts
+        timeout-minutes: 2
+        run: |
+          $runtimeTests = @('test-sqlite-interrupt.js', 'test-sqlite-primary-async.js', 'test-dispose-database.js', 'test-dispose-statement.js', 'test-v8.js')
+          foreach ($runtimeTest in $runtimeTests) {
+            & ./build/Release/tjs.exe run "tests/$runtimeTest"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Package
         run: |
           New-Item -ItemType Directory -Path artifact | Out-Null

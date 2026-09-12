@@ -32,6 +32,7 @@
 
 
 static JSClassID tjs_sqlite3_class_id;
+typedef struct TJSSqlite3Stmt TJSSqlite3Stmt;
 
 static JSValue tjs_sqlite3_new_integer(JSContext *ctx, int64_t value) {
     if (value < -INT64_C(9007199254740991) || value > INT64_C(9007199254740991)) {
@@ -45,19 +46,25 @@ typedef struct {
     uv_mutex_t mutex;
     uint64_t query_deadline_ns;
     uint64_t async_cancel_epoch;
+    uint64_t active_async_cancel_epoch;
     unsigned int async_refs;
+    unsigned int stmt_refs;
+    TJSSqlite3Stmt *deferred_stmts;
     bool closing;
+    bool finalized;
 } TJSSqlite3Handle;
 
 static int tjs_sqlite3_progress_callback(void *opaque) {
     TJSSqlite3Handle *h = opaque;
     uint64_t deadline;
+    bool cancelled;
 
     uv_mutex_lock(&h->mutex);
     deadline = h->query_deadline_ns;
+    cancelled = h->async_refs != 0 && h->async_cancel_epoch != h->active_async_cancel_epoch;
     uv_mutex_unlock(&h->mutex);
 
-    return deadline != 0 && uv_hrtime() >= deadline;
+    return cancelled || (deadline != 0 && uv_hrtime() >= deadline);
 }
 
 static int tjs_sqlite3_close_locked(TJSSqlite3Handle *h) {
@@ -77,15 +84,21 @@ static void tjs_sqlite3_finalizer(JSRuntime *rt, JSValue val) {
         return;
     }
     /* Every async request owns handle_obj, so finalization implies there are
-       no async_refs and it is safe to destroy the lifecycle mutex below. */
+       no async_refs. Statements retain the native owner independently of GC. */
     uv_mutex_lock(&h->mutex);
     h->closing = true;
+    h->finalized = true;
     if (h->handle && h->async_refs == 0) {
         tjs_sqlite3_close_locked(h);
     }
+    bool can_free = h->stmt_refs == 0;
     uv_mutex_unlock(&h->mutex);
-    uv_mutex_destroy(&h->mutex);
-    js_free_rt(rt, h);
+    // GC may finalize an unreachable Database before its statements. Native
+    // statement references keep the lifecycle mutex alive through that order.
+    if (can_free) {
+        uv_mutex_destroy(&h->mutex);
+        js_free_rt(rt, h);
+    }
 }
 
 static JSClassDef tjs_sqlite3_class = {
@@ -126,20 +139,47 @@ static TJSSqlite3Handle *tjs_sqlite3_get(JSContext *ctx, JSValue obj) {
 
 static JSClassID tjs_sqlite3_stmt_class_id;
 
-typedef struct {
+struct TJSSqlite3Stmt {
     sqlite3_stmt *stmt;
-} TJSSqlite3Stmt;
+    TJSSqlite3Handle *owner;
+    TJSSqlite3Stmt *next_deferred;
+};
+
+static void tjs_sqlite3_stmt_free(JSRuntime *rt, TJSSqlite3Stmt *h) {
+    if (h->stmt) {
+        sqlite3_reset(h->stmt);
+        sqlite3_finalize(h->stmt);
+    }
+    TJSSqlite3Handle *owner = h->owner;
+    uv_mutex_lock(&owner->mutex);
+    owner->stmt_refs--;
+    bool can_free = owner->finalized && owner->stmt_refs == 0;
+    uv_mutex_unlock(&owner->mutex);
+    if (can_free) {
+        uv_mutex_destroy(&owner->mutex);
+        js_free_rt(rt, owner);
+    }
+    js_free_rt(rt, h);
+}
 
 static void tjs_sqlite3_stmt_finalizer(JSRuntime *rt, JSValue val) {
     TJSSqlite3Stmt *h = JS_GetOpaque(val, tjs_sqlite3_stmt_class_id);
     if (!h) {
         return;
     }
-    if (h->stmt) {
-        sqlite3_reset(h->stmt);
-        sqlite3_finalize(h->stmt);
+    TJSSqlite3Handle *owner = h->owner;
+    uv_mutex_lock(&owner->mutex);
+    if (owner->async_refs != 0) {
+        // Finalizers cannot take SQLite's connection mutex on the event-loop
+        // thread while a query owns it: that would also prevent cancellation.
+        // The async request retains the owner until this list is drained.
+        h->next_deferred = owner->deferred_stmts;
+        owner->deferred_stmts = h;
+        uv_mutex_unlock(&owner->mutex);
+        return;
     }
-    js_free_rt(rt, h);
+    uv_mutex_unlock(&owner->mutex);
+    tjs_sqlite3_stmt_free(rt, h);
 }
 
 static JSClassDef tjs_sqlite3_stmt_class = {
@@ -147,7 +187,7 @@ static JSClassDef tjs_sqlite3_stmt_class = {
     .finalizer = tjs_sqlite3_stmt_finalizer,
 };
 
-static JSValue tjs_new_sqlite3_stmt(JSContext *ctx, sqlite3_stmt *stmt) {
+static JSValue tjs_new_sqlite3_stmt(JSContext *ctx, sqlite3_stmt *stmt, TJSSqlite3Handle *owner) {
     TJSSqlite3Stmt *h;
     JSValue obj;
 
@@ -163,6 +203,8 @@ static JSValue tjs_new_sqlite3_stmt(JSContext *ctx, sqlite3_stmt *stmt) {
     }
 
     h->stmt = stmt;
+    h->owner = owner;
+    owner->stmt_refs++;
 
     JS_SetOpaque(obj, h);
     return obj;
@@ -213,7 +255,9 @@ static JSValue tjs_sqlite3_open(JSContext *ctx, JSValue this_val, int argc, JSVa
     }
 
     sqlite3 *handle = NULL;
-    int r = sqlite3_open_v2(db_name, &handle, flags, NULL);
+    // A Database may lend its primary connection to the thread pool. Keep
+    // SQLite's connection mutex as a backstop to the JavaScript busy guard.
+    int r = sqlite3_open_v2(db_name, &handle, flags | SQLITE_OPEN_FULLMUTEX, NULL);
 
     JS_FreeCString(ctx, db_name);
 
@@ -446,7 +490,7 @@ static JSValue tjs_sqlite3_prepare(JSContext *ctx, JSValue this_val, int argc, J
         return tjs_throw_sqlite3_errno(ctx, r);
     }
 
-    JSValue obj = tjs_new_sqlite3_stmt(ctx, stmt);
+    JSValue obj = tjs_new_sqlite3_stmt(ctx, stmt, h);
     if (JS_IsException(obj)) {
         sqlite3_finalize(stmt);
     }
@@ -1228,9 +1272,25 @@ static JSValue tjs_sqlite3_async_rows_to_js(JSContext *ctx, const TJSSqlite3Asyn
     return result;
 }
 
-static void tjs_sqlite3_release_async(TJSSqlite3Handle *h) {
+static void tjs_sqlite3_release_async(JSContext *ctx, TJSSqlite3Handle *h) {
+    // Work has finished before any completion or submission-failure path calls
+    // here. Drain without the lifecycle mutex: SQLite cleanup may itself invoke
+    // the progress callback, which reads that mutex.
+    uv_mutex_lock(&h->mutex);
+    TJSSqlite3Stmt *stmt = h->deferred_stmts;
+    h->deferred_stmts = NULL;
+    uv_mutex_unlock(&h->mutex);
+    while (stmt) {
+        TJSSqlite3Stmt *next = stmt->next_deferred;
+        tjs_sqlite3_stmt_free(JS_GetRuntime(ctx), stmt);
+        stmt = next;
+    }
+
     uv_mutex_lock(&h->mutex);
     h->async_refs--;
+    if (h->async_refs == 0 && h->handle && h->query_deadline_ns == 0) {
+        sqlite3_progress_handler(h->handle, 0, NULL, NULL);
+    }
     if (h->closing && h->async_refs == 0 && h->handle) {
         tjs_sqlite3_close_locked(h);
     }
@@ -1264,7 +1324,7 @@ static void tjs_sqlite3_async_after_work(uv_work_t *req, int status) {
     TJSSqlite3Handle *owner = ar->owner;
     JSValue handle_obj = ar->handle_obj;
     tjs_sqlite3_async_req_free(ar);
-    tjs_sqlite3_release_async(owner);
+    tjs_sqlite3_release_async(ctx, owner);
     JS_FreeValue(ctx, handle_obj);
 }
 
@@ -1280,6 +1340,12 @@ static JSValue tjs_sqlite3_async_operation(JSContext *ctx, JSValue this_val, int
     if (!h) {
         return JS_EXCEPTION;
     }
+
+    // SQL conversion and parameter getters can synchronously deliver abort.
+    // Capture the request epoch before either can run user JavaScript.
+    uv_mutex_lock(&h->mutex);
+    uint64_t cancel_epoch = h->async_cancel_epoch;
+    uv_mutex_unlock(&h->mutex);
 
     size_t sql_length;
     const char *sql = JS_ToCStringLen(ctx, &sql_length, argv[1]);
@@ -1311,9 +1377,18 @@ static JSValue tjs_sqlite3_async_operation(JSContext *ctx, JSValue this_val, int
         tjs_sqlite3_async_req_free(ar);
         return JS_ThrowInternalError(ctx, "Database is closed");
     }
+    if (h->async_refs != 0) {
+        uv_mutex_unlock(&h->mutex);
+        tjs_sqlite3_async_req_free(ar);
+        return tjs_throw_sqlite3_errno(ctx, SQLITE_BUSY);
+    }
     h->async_refs++;
     ar->handle = h->handle;
-    ar->cancel_epoch = h->async_cancel_epoch;
+    ar->cancel_epoch = cancel_epoch;
+    h->active_async_cancel_epoch = ar->cancel_epoch;
+    // Keep cancellation effective across SQLite's prepare/first-step boundary,
+    // where sqlite3_interrupt alone can be cleared before a statement runs.
+    sqlite3_progress_handler(h->handle, 1000, tjs_sqlite3_progress_callback, h);
     uv_mutex_unlock(&h->mutex);
 
     ar->ctx = ctx;
@@ -1325,7 +1400,7 @@ static JSValue tjs_sqlite3_async_operation(JSContext *ctx, JSValue this_val, int
 
     JSValue promise = TJS_InitPromise(ctx, &ar->result);
     if (JS_IsException(promise)) {
-        tjs_sqlite3_release_async(h);
+        tjs_sqlite3_release_async(ctx, h);
         JS_FreeValue(ctx, ar->handle_obj);
         tjs_sqlite3_async_req_free(ar);
         return promise;
@@ -1335,7 +1410,7 @@ static JSValue tjs_sqlite3_async_operation(JSContext *ctx, JSValue this_val, int
     if (r != 0) {
         JS_FreeValue(ctx, promise);
         tjs_sqlite3_clear_promise(ctx, &ar->result);
-        tjs_sqlite3_release_async(h);
+        tjs_sqlite3_release_async(ctx, h);
         JS_FreeValue(ctx, ar->handle_obj);
         tjs_sqlite3_async_req_free(ar);
         return tjs_throw_errno(ctx, r);

@@ -1,11 +1,39 @@
 import core from 'tjs:internal/core';
 const sqlite3 = core.sqlite3;
 const SQLITE_INTERRUPT = 9;
+const SQLITE_BUSY = 5;
 
 let controllers;
+let runDatabaseSync;
+
+function busyError() {
+    return Object.assign(new Error('Database is busy with another operation'), { errno: SQLITE_BUSY });
+}
 
 class Database {
     #handle;
+    #syncDepth = 0;
+    #activeOperation;
+
+    static {
+        runDatabaseSync = (database, operation) => database.#runSync(operation);
+    }
+
+    #runSync(operation) {
+        if (this.#activeOperation) {
+            throw busyError();
+        }
+
+        // Parameter getters and transaction callbacks can re-enter JavaScript.
+        // They must not start threaded work before the synchronous call returns.
+        this.#syncDepth++;
+
+        try {
+            return operation();
+        } finally {
+            this.#syncDepth--;
+        }
+    }
 
     constructor(dbName = ':memory:', options = { create: true, readOnly: false }) {
         let flags = 0;
@@ -24,10 +52,12 @@ class Database {
     }
 
     close() {
-        if (this.#handle) {
-            sqlite3.close(this.#handle);
-            this.#handle = null;
-        }
+        return this.#runSync(() => {
+            if (this.#handle) {
+                sqlite3.close(this.#handle);
+                this.#handle = null;
+            }
+        });
     }
 
     [Symbol.dispose]() {
@@ -35,41 +65,102 @@ class Database {
     }
 
     exec(sql) {
+        return this.#runSync(() => {
+            if (!this.#handle) {
+                throw new Error('Invalid DB');
+            }
+
+            sqlite3.exec(this.#handle, sql);
+        });
+    }
+
+    async allAsync(sql, params = [], options = {}) {
+        if (this.#activeOperation || this.#syncDepth !== 0) {
+            throw busyError();
+        }
+
         if (!this.#handle) {
             throw new Error('Invalid DB');
         }
 
-        sqlite3.exec(this.#handle, sql);
+        const handle = this.#handle;
+        const activeOperation = { interruptOrigin: null };
+
+        this.#activeOperation = activeOperation;
+        let signal;
+
+        const onAbort = () => {
+            if (!activeOperation.interruptOrigin) {
+                activeOperation.interruptOrigin = 'signal';
+            }
+
+            sqlite3.cancel_async(handle);
+            sqlite3.interrupt(handle);
+        };
+
+        try {
+            signal = options?.signal;
+
+            if (signal?.aborted) {
+                throw new Error('Aborted');
+            }
+
+            signal?.addEventListener('abort', onAbort, { once: true });
+
+            return await sqlite3.async_all(handle, sql, params);
+        } catch (error) {
+            if (activeOperation.interruptOrigin === 'signal' && error?.errno === SQLITE_INTERRUPT) {
+                throw new Error('Aborted', { cause: error });
+            }
+
+            throw error;
+        } finally {
+            try {
+                signal?.removeEventListener('abort', onAbort);
+            } finally {
+                this.#activeOperation = undefined;
+            }
+        }
     }
 
     interrupt() {
         if (this.#handle) {
+            if (this.#activeOperation && !this.#activeOperation.interruptOrigin) {
+                this.#activeOperation.interruptOrigin = 'direct';
+            }
+
             sqlite3.interrupt(this.#handle);
         }
     }
 
     setQueryDeadline(ms) {
-        if (!this.#handle) {
-            throw new Error('Invalid DB');
-        }
+        return this.#runSync(() => {
+            if (!this.#handle) {
+                throw new Error('Invalid DB');
+            }
 
-        sqlite3.set_query_deadline(this.#handle, ms);
+            sqlite3.set_query_deadline(this.#handle, ms);
+        });
     }
 
     clearQueryDeadline() {
-        if (!this.#handle) {
-            throw new Error('Invalid DB');
-        }
+        return this.#runSync(() => {
+            if (!this.#handle) {
+                throw new Error('Invalid DB');
+            }
 
-        sqlite3.clear_query_deadline(this.#handle);
+            sqlite3.clear_query_deadline(this.#handle);
+        });
     }
 
     prepare(sql) {
-        if (!this.#handle) {
-            throw new Error('Invalid DB');
-        }
+        return this.#runSync(() => {
+            if (!this.#handle) {
+                throw new Error('Invalid DB');
+            }
 
-        return new Statement(sqlite3.prepare(this.#handle, sql));
+            return new Statement(sqlite3.prepare(this.#handle, sql), this);
+        });
     }
 
     // Code for transactions is largely copied from better-sqlite3 and Bun
@@ -77,11 +168,13 @@ class Database {
     // https://github.com/oven-sh/bun/blob/main/src/js/bun/sqlite.ts
 
     get inTransaction() {
-        if (!this.#handle) {
-            return false;
-        }
+        return this.#runSync(() => {
+            if (!this.#handle) {
+                return false;
+            }
 
-        return sqlite3.in_transaction(this.#handle);
+            return sqlite3.in_transaction(this.#handle);
+        });
     }
 
     transaction(fn) {
@@ -110,7 +203,7 @@ class Database {
     }
 
     loadExtension(file, entrypoint=undefined) {
-        return sqlite3.load_extension(this.#handle,file,entrypoint);
+        return this.#runSync(() => sqlite3.load_extension(this.#handle,file,entrypoint));
     }
 }
 
@@ -143,48 +236,52 @@ const getController = db => {
 // Return a new transaction function by wrapping the given function.
 const wrapTransaction = (fn, db, { begin, commit, rollback, savepoint, release, rollbackTo }) =>
     function transaction() {
-        let before, after, undo;
+        return runDatabaseSync(db, () => {
+            let before, after, undo;
 
-        if (db.inTransaction) {
-            before = savepoint;
-            after = release;
-            undo = rollbackTo;
-        } else {
-            before = begin;
-            after = commit;
-            undo = rollback;
-        }
-
-        try {
-            before.run();
-
-            const result = Function.prototype.apply.call(fn, this, arguments);
-
-            after.run();
-
-            return result;
-        } catch (ex) {
             if (db.inTransaction) {
-                undo.run();
-
-                if (undo !== rollback) {
-                    after.run();
-                }
+                before = savepoint;
+                after = release;
+                undo = rollbackTo;
+            } else {
+                before = begin;
+                after = commit;
+                undo = rollback;
             }
 
-            throw ex;
-        }
+            try {
+                before.run();
+
+                const result = Function.prototype.apply.call(fn, this, arguments);
+
+                after.run();
+
+                return result;
+            } catch (ex) {
+                if (db.inTransaction) {
+                    undo.run();
+
+                    if (undo !== rollback) {
+                        after.run();
+                    }
+                }
+
+                throw ex;
+            }
+        });
     };
 
 class Statement {
     #stmt;
+    #database;
 
-    constructor(stmt) {
+    constructor(stmt, database) {
         this.#stmt = stmt;
+        this.#database = database;
     }
 
     finalize() {
-        sqlite3.stmt_finalize(this.#stmt);
+        return runDatabaseSync(this.#database, () => sqlite3.stmt_finalize(this.#stmt));
     }
 
     [Symbol.dispose]() {
@@ -192,7 +289,7 @@ class Statement {
     }
 
     toString() {
-        return sqlite3.stmt_expand(this.#stmt);
+        return runDatabaseSync(this.#database, () => sqlite3.stmt_expand(this.#stmt));
     }
 
     all(...args) {
@@ -200,7 +297,7 @@ class Statement {
             args = args[0];
         }
 
-        return sqlite3.stmt_all(this.#stmt, args);
+        return runDatabaseSync(this.#database, () => sqlite3.stmt_all(this.#stmt, args));
     }
 
     run(...args) {
@@ -208,7 +305,7 @@ class Statement {
             args = args[0];
         }
 
-        sqlite3.stmt_run(this.#stmt, args);
+        return runDatabaseSync(this.#database, () => sqlite3.stmt_run(this.#stmt, args));
     }
 }
 
@@ -246,11 +343,13 @@ class AsyncDatabase {
             if (signal) {
                 return this.#runSignalled(handle, operation, signal);
             }
+
             return operation(handle);
         });
 
         // A rejected operation must not poison the per-connection FIFO.
         this.#tail = result.then(() => undefined, () => undefined);
+
         return result;
     }
 
@@ -260,10 +359,12 @@ class AsyncDatabase {
         }
 
         const activeOperation = { interruptOrigin: null };
+
         const onAbort = () => {
             if (!activeOperation.interruptOrigin) {
                 activeOperation.interruptOrigin = 'signal';
             }
+
             // interrupt() alone is not enough: SQLite clears its interrupt
             // flag while no statement is active, discarding aborts that land
             // before the queued request starts stepping. cancel_async marks
@@ -271,6 +372,7 @@ class AsyncDatabase {
             sqlite3.cancel_async(handle);
             sqlite3.interrupt(handle);
         };
+
         signal.addEventListener('abort', onAbort, { once: true });
         this.#activeOperation = activeOperation;
 
@@ -279,11 +381,13 @@ class AsyncDatabase {
         } catch (error) {
             // Direct interrupt() calls retain their native SQLITE_INTERRUPT error.
             if (activeOperation.interruptOrigin === 'signal' && error?.errno === SQLITE_INTERRUPT) {
-                throw new Error('Aborted');
+                throw new Error('Aborted', { cause: error });
             }
+
             throw error;
         } finally {
             signal.removeEventListener('abort', onAbort);
+
             if (this.#activeOperation === activeOperation) {
                 this.#activeOperation = undefined;
             }
@@ -293,6 +397,7 @@ class AsyncDatabase {
     #parseOperationArgs(args) {
         let options;
         const optionsCandidate = args[1];
+
         // Preserve a legacy Uint8Array positional parameter while accepting
         // the incumbent's run/all(sql, params, options) call shape.
         if (args.length === 2 && optionsCandidate !== null && typeof optionsCandidate === 'object' &&
@@ -326,6 +431,7 @@ class AsyncDatabase {
             if (this.#activeOperation && !this.#activeOperation.interruptOrigin) {
                 this.#activeOperation.interruptOrigin = 'direct';
             }
+
             sqlite3.interrupt(this.#handle);
         }
     }
@@ -334,14 +440,17 @@ class AsyncDatabase {
         if (this.#closePromise) {
             return this.#closePromise;
         }
+
         if (!this.#handle) {
             return Promise.resolve();
         }
 
         const handle = this.#handle;
+
         this.#closing = true;
 
         const close = this.#tail.then(() => sqlite3.close(handle));
+
         this.#closePromise = close.then(() => {
             this.#handle = null;
         }, error => {
