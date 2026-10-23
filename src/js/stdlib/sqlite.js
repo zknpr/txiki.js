@@ -10,15 +10,11 @@ function busyError() {
     return Object.assign(new Error('Database is busy with another operation'), { errno: SQLITE_BUSY });
 }
 
-// Every connection refuses ATTACH (see tjs_sqlite3_authorizer) except plain
-// VACUUM's private temporary database and the one path permitted here.
-function checkAttachPermit(path) {
-    if (path === null || path === undefined) {
-        return;
-    }
-
+// Every connection refuses ATTACH (see tjs_sqlite3_authorizer), which also
+// refuses SQL-level VACUUM INTO. vacuumInto is the one way to write a copy.
+function checkVacuumTarget(path) {
     if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) {
-        throw new TypeError('An ATTACH permit must be a non-empty path without NUL characters, or null');
+        throw new TypeError('A VACUUM INTO destination must be a non-empty path without NUL characters');
     }
 }
 
@@ -222,15 +218,15 @@ class Database {
         return this.#runSync(() => sqlite3.load_extension(this.#handle,file,entrypoint));
     }
 
-    permitAttach(path) {
-        checkAttachPermit(path);
+    vacuumInto(path) {
+        checkVacuumTarget(path);
 
         return this.#runSync(() => {
             if (!this.#handle) {
                 throw new Error('Invalid DB');
             }
 
-            sqlite3.set_attach_permit(this.#handle, path ?? null);
+            sqlite3.vacuum_into(this.#handle, path);
         });
     }
 }
@@ -471,15 +467,14 @@ class AsyncDatabase {
         }
     }
 
-    // Takes effect immediately, including for work already queued.
-    permitAttach(path) {
-        checkAttachPermit(path);
-
-        if (!this.#handle || this.#closing) {
-            throw new Error('Invalid DB');
+    vacuumInto(path, options) {
+        try {
+            checkVacuumTarget(path);
+        } catch (error) {
+            return Promise.reject(error);
         }
 
-        sqlite3.set_attach_permit(this.#handle, path ?? null);
+        return this.#enqueue(handle => sqlite3.async_vacuum_into(handle, path), options?.signal);
     }
 
     close() {

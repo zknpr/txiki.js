@@ -50,7 +50,10 @@ typedef struct {
     unsigned int async_refs;
     unsigned int stmt_refs;
     TJSSqlite3Stmt *deferred_stmts;
-    char *attach_permit;
+    /* Destination of the VACUUM INTO that vacuum_into is running and the
+       thread running it. Borrowed from the caller; NULL when none runs. */
+    const char *vacuum_target;
+    uv_thread_t vacuum_thread;
     bool closing;
     bool finalized;
 } TJSSqlite3Handle;
@@ -70,12 +73,14 @@ static int tjs_sqlite3_progress_callback(void *opaque) {
 
 /* Path authority: ATTACH opens any file the process can reach, so every
    connection refuses it except for two filenames. "" is the private temporary
-   database plain VACUUM attaches internally. The single path permitted through
-   set_attach_permit is the destination of the embedder's own VACUUM INTO,
-   which attaches its target the same way. VACUUM's internal ATTACH reaches
-   this callback with the dequoted target, so SQL-level VACUUM INTO any other
-   path is refused too. A filename that is not a string literal arrives as
-   NULL. DETACH has no use once ATTACH is closed.
+   database plain VACUUM attaches internally. The other is the destination of
+   a running vacuum_into, which attaches its target the same way; it is
+   accepted only on the thread executing that one statement and only while it
+   runs, so no other statement compiled on the connection, queued or
+   concurrent, can borrow it. VACUUM's internal ATTACH reaches this callback
+   with the dequoted target, so SQL-level VACUUM INTO is refused too. A
+   filename that is not a string literal arrives as NULL. DETACH has no use
+   once ATTACH is closed.
 
    This runs inside sqlite3_prepare and, for VACUUM, inside sqlite3_step, with
    SQLite's connection mutex held. Taking the handle mutex here follows the
@@ -88,6 +93,7 @@ static int tjs_sqlite3_authorizer(void *opaque,
                                   const char *db_name,
                                   const char *trigger) {
     TJSSqlite3Handle *h = opaque;
+    uv_thread_t self = uv_thread_self();
     bool permitted;
 
     if (action == SQLITE_DETACH) {
@@ -104,10 +110,49 @@ static int tjs_sqlite3_authorizer(void *opaque,
     }
 
     uv_mutex_lock(&h->mutex);
-    permitted = h->attach_permit && strcmp(h->attach_permit, arg1) == 0;
+    permitted = h->vacuum_target && uv_thread_equal(&h->vacuum_thread, &self) && strcmp(h->vacuum_target, arg1) == 0;
     uv_mutex_unlock(&h->mutex);
 
     return permitted ? SQLITE_OK : SQLITE_DENY;
+}
+
+/* VACUUM main INTO target on the calling thread, with the target accepted by
+   the authorizer for exactly this statement. The SQL is fixed, so the
+   exception cannot be used for anything but this snapshot. */
+static int tjs_sqlite3_vacuum_into_on_thread(TJSSqlite3Handle *h, sqlite3 *handle, const char *target) {
+    sqlite3_stmt *stmt = NULL;
+
+    uv_mutex_lock(&h->mutex);
+    if (h->vacuum_target) {
+        uv_mutex_unlock(&h->mutex);
+        return SQLITE_BUSY;
+    }
+    h->vacuum_target = target;
+    h->vacuum_thread = uv_thread_self();
+    uv_mutex_unlock(&h->mutex);
+
+    int r = sqlite3_prepare_v2(handle, "VACUUM main INTO ?", -1, &stmt, NULL);
+    if (r == SQLITE_OK) {
+        r = sqlite3_bind_text(stmt, 1, target, -1, SQLITE_STATIC);
+    }
+    if (r == SQLITE_OK) {
+        int step_r = sqlite3_step(stmt);
+        if (step_r != SQLITE_DONE && step_r != SQLITE_ROW) {
+            r = step_r;
+        }
+    }
+    if (stmt) {
+        int finalize_r = sqlite3_finalize(stmt);
+        if (r == SQLITE_OK && finalize_r != SQLITE_OK) {
+            r = finalize_r;
+        }
+    }
+
+    uv_mutex_lock(&h->mutex);
+    h->vacuum_target = NULL;
+    uv_mutex_unlock(&h->mutex);
+
+    return r;
 }
 
 static int tjs_sqlite3_close_locked(TJSSqlite3Handle *h) {
@@ -140,7 +185,6 @@ static void tjs_sqlite3_finalizer(JSRuntime *rt, JSValue val) {
     // statement references keep the lifecycle mutex alive through that order.
     if (can_free) {
         uv_mutex_destroy(&h->mutex);
-        js_free_rt(rt, h->attach_permit);
         js_free_rt(rt, h);
     }
 }
@@ -201,7 +245,6 @@ static void tjs_sqlite3_stmt_free(JSRuntime *rt, TJSSqlite3Stmt *h) {
     uv_mutex_unlock(&owner->mutex);
     if (can_free) {
         uv_mutex_destroy(&owner->mutex);
-        js_free_rt(rt, owner->attach_permit);
         js_free_rt(rt, owner);
     }
     js_free_rt(rt, h);
@@ -338,32 +381,34 @@ static JSValue tjs_sqlite3_open(JSContext *ctx, JSValue this_val, int argc, JSVa
     return obj;
 }
 
-static JSValue tjs_sqlite3_set_attach_permit(JSContext *ctx, JSValue this_val, int argc, JSValue *argv) {
+static JSValue tjs_sqlite3_vacuum_into(JSContext *ctx, JSValue this_val, int argc, JSValue *argv) {
     TJSSqlite3Handle *h = tjs_sqlite3_get(ctx, argv[0]);
-    char *permit = NULL;
-
     if (!h) {
         return JS_EXCEPTION;
     }
 
-    if (!JS_IsNull(argv[1]) && !JS_IsUndefined(argv[1])) {
-        const char *path = JS_ToCString(ctx, argv[1]);
-        if (!path) {
-            return JS_EXCEPTION;
-        }
-        permit = js_strdup(ctx, path);
-        JS_FreeCString(ctx, path);
-        if (!permit) {
-            return JS_EXCEPTION;
-        }
+    const char *target = JS_ToCString(ctx, argv[1]);
+    if (!target) {
+        return JS_EXCEPTION;
     }
 
     uv_mutex_lock(&h->mutex);
-    char *previous = h->attach_permit;
-    h->attach_permit = permit;
+    sqlite3 *handle = h->closing ? NULL : h->handle;
+    bool lent = h->async_refs != 0;
     uv_mutex_unlock(&h->mutex);
 
-    js_free(ctx, previous);
+    int r;
+    if (!handle) {
+        JS_FreeCString(ctx, target);
+        return JS_ThrowInternalError(ctx, "Database is closed");
+    }
+    // A primary connection lent to the thread pool is busy until it returns.
+    r = lent ? SQLITE_BUSY : tjs_sqlite3_vacuum_into_on_thread(h, handle, target);
+    JS_FreeCString(ctx, target);
+
+    if (r != SQLITE_OK) {
+        return tjs_throw_sqlite3_errno(ctx, r);
+    }
 
     return JS_UNDEFINED;
 }
@@ -661,7 +706,11 @@ static JSValue tjs__stmt2obj(JSContext *ctx, TJSSqlite3Stmt *h) {
                 break;
             }
             case SQLITE3_TEXT: {
-                value = JS_NewString(ctx, (const char *) sqlite3_column_text(h->stmt, i));
+                // By length, as the async path does: TEXT may contain NUL.
+                const char *text = (const char *) sqlite3_column_text(h->stmt, i);
+                int length = sqlite3_column_bytes(h->stmt, i);
+                value = text || length == 0 ? JS_NewStringLen(ctx, text ? text : "", (size_t) length)
+                                            : JS_ThrowOutOfMemory(ctx);
                 break;
             }
             case SQLITE_BLOB: {
@@ -676,6 +725,10 @@ static JSValue tjs__stmt2obj(JSContext *ctx, TJSSqlite3Stmt *h) {
             }
         }
 
+        if (JS_IsException(value)) {
+            JS_FreeValue(ctx, obj);
+            return value;
+        }
         JS_DefinePropertyValueStr(ctx, obj, name, value, JS_PROP_C_W_E);
     }
 
@@ -857,6 +910,7 @@ typedef struct {
     sqlite3 *handle;
     JSValue handle_obj;
     char *sql;
+    char *vacuum_target;
     TJSSqlite3RawValue *params;
     size_t param_count;
     uint64_t cancel_epoch;
@@ -889,6 +943,7 @@ static void tjs_sqlite3_raw_values_free(TJSSqlite3RawValue *values, size_t count
 
 static void tjs_sqlite3_async_req_free(TJSSqlite3AsyncReq *ar) {
     free(ar->sql);
+    free(ar->vacuum_target);
     tjs_sqlite3_raw_values_free(ar->params, ar->param_count);
     if (ar->column_names) {
         for (int i = 0; i < ar->column_count; i++) {
@@ -1271,6 +1326,11 @@ static void tjs_sqlite3_async_work(uv_work_t *req) {
         return;
     }
 
+    if (ar->vacuum_target) {
+        ar->r = tjs_sqlite3_vacuum_into_on_thread(owner, ar->handle, ar->vacuum_target);
+        return;
+    }
+
     ar->r = sqlite3_prepare_v2(ar->handle, ar->sql, -1, &stmt, NULL);
     if (ar->r == SQLITE_OK) {
         ar->r = tjs_sqlite3_async_bind(ar, stmt);
@@ -1420,7 +1480,13 @@ static void tjs_sqlite3_clear_promise(JSContext *ctx, TJSPromise *promise) {
     TJS_ClearPromise(ctx, promise);
 }
 
-static JSValue tjs_sqlite3_async_operation(JSContext *ctx, JSValue this_val, int argc, JSValue *argv, bool all) {
+/* argv[1] is the SQL, or the destination path when vacuum is set. */
+static JSValue tjs_sqlite3_async_operation(JSContext *ctx,
+                                           JSValue this_val,
+                                           int argc,
+                                           JSValue *argv,
+                                           bool all,
+                                           bool vacuum) {
     TJSSqlite3Handle *h = tjs_sqlite3_get(ctx, argv[0]);
     if (!h) {
         return JS_EXCEPTION;
@@ -1432,28 +1498,32 @@ static JSValue tjs_sqlite3_async_operation(JSContext *ctx, JSValue this_val, int
     uint64_t cancel_epoch = h->async_cancel_epoch;
     uv_mutex_unlock(&h->mutex);
 
-    size_t sql_length;
-    const char *sql = JS_ToCStringLen(ctx, &sql_length, argv[1]);
-    if (!sql) {
+    size_t text_length;
+    const char *text = JS_ToCStringLen(ctx, &text_length, argv[1]);
+    if (!text) {
         return JS_EXCEPTION;
     }
 
     TJSSqlite3AsyncReq *ar = calloc(1, sizeof(*ar));
     if (!ar) {
-        JS_FreeCString(ctx, sql);
+        JS_FreeCString(ctx, text);
         return JS_ThrowOutOfMemory(ctx);
     }
-    ar->sql = tjs_sqlite3_raw_copy(sql, sql_length, true);
-    JS_FreeCString(ctx, sql);
-    if (!ar->sql) {
+    char *copy = tjs_sqlite3_raw_copy(text, text_length, true);
+    JS_FreeCString(ctx, text);
+    if (!copy) {
         tjs_sqlite3_async_req_free(ar);
         return JS_ThrowOutOfMemory(ctx);
     }
-
-    JSValue params = argc >= 3 ? argv[2] : JS_UNDEFINED;
-    if (tjs_sqlite3_serialize_params(ctx, params, &ar->params, &ar->param_count, &ar->named_params) < 0) {
-        tjs_sqlite3_async_req_free(ar);
-        return JS_EXCEPTION;
+    if (vacuum) {
+        ar->vacuum_target = copy;
+    } else {
+        ar->sql = copy;
+        JSValue params = argc >= 3 ? argv[2] : JS_UNDEFINED;
+        if (tjs_sqlite3_serialize_params(ctx, params, &ar->params, &ar->param_count, &ar->named_params) < 0) {
+            tjs_sqlite3_async_req_free(ar);
+            return JS_EXCEPTION;
+        }
     }
 
     uv_mutex_lock(&h->mutex);
@@ -1505,11 +1575,15 @@ static JSValue tjs_sqlite3_async_operation(JSContext *ctx, JSValue this_val, int
 }
 
 static JSValue tjs_sqlite3_async_run(JSContext *ctx, JSValue this_val, int argc, JSValue *argv) {
-    return tjs_sqlite3_async_operation(ctx, this_val, argc, argv, false);
+    return tjs_sqlite3_async_operation(ctx, this_val, argc, argv, false, false);
 }
 
 static JSValue tjs_sqlite3_async_all(JSContext *ctx, JSValue this_val, int argc, JSValue *argv) {
-    return tjs_sqlite3_async_operation(ctx, this_val, argc, argv, true);
+    return tjs_sqlite3_async_operation(ctx, this_val, argc, argv, true, false);
+}
+
+static JSValue tjs_sqlite3_async_vacuum_into(JSContext *ctx, JSValue this_val, int argc, JSValue *argv) {
+    return tjs_sqlite3_async_operation(ctx, this_val, argc, argv, false, true);
 }
 
 static JSValue tjs_sqlite3_stmt_all(JSContext *ctx, JSValue this_val, int argc, JSValue *argv) {
@@ -1540,7 +1614,12 @@ static JSValue tjs_sqlite3_stmt_all(JSContext *ctx, JSValue this_val, int argc, 
     uint32_t i = 0;
 
     while ((r = sqlite3_step(h->stmt)) == SQLITE_ROW) {
-        JS_DefinePropertyValueUint32(ctx, result, i, tjs__stmt2obj(ctx, h), JS_PROP_C_W_E);
+        JSValue row = tjs__stmt2obj(ctx, h);
+        if (JS_IsException(row)) {
+            JS_FreeValue(ctx, result);
+            return row;
+        }
+        JS_DefinePropertyValueUint32(ctx, result, i, row, JS_PROP_C_W_E);
         i++;
     }
 
@@ -1587,7 +1666,7 @@ static JSValue tjs_sqlite3_stmt_run(JSContext *ctx, JSValue this_val, int argc, 
 static const JSCFunctionListEntry tjs_sqlite3_funcs[] = {
     TJS_CFUNC_DEF("open", 2, tjs_sqlite3_open),
     TJS_CFUNC_DEF("load_extension", 3, tjs_sqlite3_load_extension),
-    TJS_CFUNC_DEF("set_attach_permit", 2, tjs_sqlite3_set_attach_permit),
+    TJS_CFUNC_DEF("vacuum_into", 2, tjs_sqlite3_vacuum_into),
     TJS_CFUNC_DEF("close", 1, tjs_sqlite3_close),
     TJS_CFUNC_DEF("interrupt", 1, tjs_sqlite3_interrupt),
     TJS_CFUNC_DEF("cancel_async", 1, tjs_sqlite3_cancel_async),
@@ -1595,6 +1674,7 @@ static const JSCFunctionListEntry tjs_sqlite3_funcs[] = {
     TJS_CFUNC_DEF("clear_query_deadline", 1, tjs_sqlite3_clear_query_deadline),
     TJS_CFUNC_DEF("async_run", 3, tjs_sqlite3_async_run),
     TJS_CFUNC_DEF("async_all", 3, tjs_sqlite3_async_all),
+    TJS_CFUNC_DEF("async_vacuum_into", 2, tjs_sqlite3_async_vacuum_into),
     TJS_CFUNC_DEF("exec", 2, tjs_sqlite3_exec),
     TJS_CFUNC_DEF("prepare", 2, tjs_sqlite3_prepare),
     TJS_CFUNC_DEF("in_transaction", 1, tjs_sqlite3_in_transaction),

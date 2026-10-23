@@ -68,35 +68,25 @@ function bundledVersionMeetsFloor() {
     }
 }
 
-function attachIsDeniedUnlessPermitted(dir) {
+function attachIsDenied(dir) {
     const outsidePath = `${dir}/outside.db`;
 
     createOutsideDatabase(outsidePath);
 
     const db = new Database(`${dir}/main.db`, { create: true });
 
+    // SQLITE_AUTH comes only from an authorizer, so these refusals are the
+    // runtime's, not the path's or the syntax's.
     assertDenied(() => db.exec(`ATTACH ${quote(outsidePath)} AS x`), 'ATTACH of an existing file is refused');
-
-    // Control arm: the same statement succeeds once permitted, so the refusal
-    // above comes from the authorizer, not from the path or the syntax.
-    db.permitAttach(outsidePath);
-    db.exec(`ATTACH ${quote(outsidePath)} AS x`);
-    assert.eq(db.prepare('SELECT value FROM x.secret').all()[0].value, 'outside', 'the permitted path attaches');
-    assertDenied(() => db.exec('DETACH x'), 'DETACH is refused');
-
-    db.permitAttach(null);
-    assertDenied(() => db.exec(`ATTACH ${quote(outsidePath)} AS y`), 'withdrawing the permit refuses again');
-
-    // A filename that is not a string literal reaches the authorizer as NULL.
-    db.permitAttach(outsidePath);
     assertDenied(
         () => db.exec(`ATTACH ${quote(outsidePath.slice(0, -3))} || '.db' AS z`),
-        'an expression filename is refused even when it evaluates to the permitted path',
+        'an expression filename is refused',
     );
-    db.permitAttach(null);
 
-    // Plain VACUUM attaches a private temporary database named ''.
+    // Plain VACUUM attaches a private temporary database named '', and DETACH
+    // is refused even for a database the connection could attach.
     db.exec('ATTACH \'\' AS scratch');
+    assertDenied(() => db.exec('DETACH scratch'), 'DETACH is refused');
     db.exec('CREATE TABLE t(v); INSERT INTO t VALUES (1); VACUUM;');
     db.close();
 
@@ -109,23 +99,30 @@ function attachIsDeniedUnlessPermitted(dir) {
     readOnly.close();
 }
 
-async function vacuumIntoNeedsThePermit(dir) {
+async function onlyVacuumIntoWritesACopy(dir) {
     const db = new Database(`${dir}/vacuum.db`, { create: true });
     const deniedCopy = `${dir}/denied-copy.db`;
-    const permittedCopy = `${dir}/permitted-copy.db`;
+    const copyPath = `${dir}/copy.db`;
 
     db.exec('CREATE TABLE t(v); INSERT INTO t VALUES (42);');
 
-    assertDenied(() => db.exec(`VACUUM INTO ${quote(deniedCopy)}`), 'VACUUM INTO an unpermitted path is refused');
+    assertDenied(() => db.exec(`VACUUM INTO ${quote(deniedCopy)}`), 'SQL-level VACUUM INTO is refused');
     assert.ok(!(await exists(deniedCopy)), 'a refused VACUUM INTO creates no file');
 
-    db.permitAttach(permittedCopy);
-    db.exec(`VACUUM main INTO ${quote(permittedCopy)}`);
-    db.permitAttach(null);
-    assert.ok(await exists(permittedCopy), 'the permitted VACUUM INTO writes its destination');
+    // Control arm: the same destination through vacuumInto succeeds.
+    db.vacuumInto(deniedCopy);
+    assert.ok(await exists(deniedCopy), 'vacuumInto writes its destination');
+    await tjs.remove(deniedCopy);
+
+    // The destination is accepted only while that statement runs.
+    db.vacuumInto(copyPath);
+    assertDenied(() => db.exec(`ATTACH ${quote(copyPath)} AS x`), 'the last vacuumInto target stays unattachable');
+    await tjs.remove(copyPath);
+    assertDenied(() => db.exec(`VACUUM INTO ${quote(copyPath)}`), 'SQL-level VACUUM INTO its target stays refused');
+    db.vacuumInto(copyPath);
     db.close();
 
-    const copy = new Database(permittedCopy, { readOnly: true });
+    const copy = new Database(copyPath, { readOnly: true });
 
     assert.eq(copy.prepare('SELECT v FROM t').all()[0].v, 42, 'the copy holds the data');
     copy.close();
@@ -135,50 +132,56 @@ async function asyncConnectionsAreCovered(dir) {
     const outsidePath = `${dir}/outside.db`;
     const db = new AsyncDatabase(`${dir}/vacuum.db`);
     const deniedCopy = `${dir}/async-denied-copy.db`;
-    const permittedCopy = `${dir}/async-permitted-copy.db`;
+    const copyPath = `${dir}/async-copy.db`;
 
     await assertDeniedAsync(db.run(`ATTACH ${quote(outsidePath)} AS x`, []), 'thread-pool ATTACH is refused');
     await assertDeniedAsync(db.run('VACUUM main INTO ?', [ deniedCopy ]), 'bound VACUUM INTO is refused');
     assert.ok(!(await exists(deniedCopy)), 'a refused async VACUUM INTO creates no file');
 
-    // The embedder's own snapshot: permit, VACUUM INTO a bound path, withdraw.
-    db.permitAttach(permittedCopy);
+    // Operations queued around the snapshot never see its destination
+    // accepted, including one submitted before it.
+    const before = db.run(`ATTACH ${quote(copyPath)} AS early`, []);
+    const snapshot = db.vacuumInto(copyPath);
+    const after = db.run(`ATTACH ${quote(copyPath)} AS late`, []);
 
-    try {
-        await db.run('VACUUM main INTO ?', [ permittedCopy ]);
-    } finally {
-        db.permitAttach(null);
-    }
-
-    assert.ok(await exists(permittedCopy), 'the permitted async VACUUM INTO writes its destination');
-    await assertDeniedAsync(
-        db.run('VACUUM main INTO ?', [ `${dir}/after-withdraw.db` ]),
-        'the async permit is withdrawn',
-    );
+    await assertDeniedAsync(before, 'an ATTACH queued before vacuumInto is refused');
+    await snapshot;
+    await assertDeniedAsync(after, 'an ATTACH queued after vacuumInto is refused');
+    assert.ok(await exists(copyPath), 'the async vacuumInto writes its destination');
     await db.close();
 }
 
-function permitArgumentsAreValidated() {
+async function vacuumIntoArgumentsAreValidated() {
     const db = new Database();
+    const asyncDb = new AsyncDatabase();
 
-    for (const value of [ '', 'a\0b', 42, {} ]) {
-        assert.throws(() => db.permitAttach(value), TypeError, `permitAttach rejects ${JSON.stringify(value)}`);
+    for (const value of [ '', 'a\0b', 42, {}, null, undefined ]) {
+        assert.throws(() => db.vacuumInto(value), TypeError, `vacuumInto rejects ${JSON.stringify(value)}`);
+
+        let error;
+
+        try {
+            await asyncDb.vacuumInto(value);
+        } catch (caught) {
+            error = caught;
+        }
+
+        assert.ok(error instanceof TypeError, `async vacuumInto rejects ${JSON.stringify(value)}`);
     }
 
-    db.permitAttach(undefined);
-    db.permitAttach(null);
     db.close();
-    assert.throws(() => db.permitAttach('/x.db'), Error, 'permitAttach on a closed database throws');
+    await asyncDb.close();
+    assert.throws(() => db.vacuumInto('/x.db'), Error, 'vacuumInto on a closed database throws');
 }
 
 const dir = await tjs.makeTempDir(`${tjs.tmpDir}/tjs-sqlite-attach-XXXXXX`);
 
 try {
     bundledVersionMeetsFloor();
-    attachIsDeniedUnlessPermitted(dir);
-    await vacuumIntoNeedsThePermit(dir);
+    attachIsDenied(dir);
+    await onlyVacuumIntoWritesACopy(dir);
     await asyncConnectionsAreCovered(dir);
-    permitArgumentsAreValidated();
+    await vacuumIntoArgumentsAreValidated();
 } finally {
     await tjs.remove(dir, { recursive: true });
 }

@@ -186,13 +186,16 @@ declare module 'tjs:sqlite'{
         loadExtension(file:string, entrypoint?:string): undefined;
 
         /**
-         * Every connection refuses ATTACH and DETACH, including the ATTACH that
-         * VACUUM INTO performs on its destination. Only plain VACUUM's private
-         * temporary database and the path permitted here may be attached.
+         * Write a copy of the main database to `path` with `VACUUM main INTO`.
          *
-         * @param path The one attachable path, or `null` to withdraw the permit.
+         * Every connection refuses ATTACH and DETACH, including the ATTACH that
+         * VACUUM INTO performs on its destination, so SQL-level VACUUM INTO is
+         * refused. This method is the one exception: `path` is accepted only
+         * for this statement, on the thread running it, while it runs.
+         *
+         * @param path Destination file; must not contain NUL characters.
          */
-        permitAttach(path: string | null): void;
+        vacuumInto(path: string): void;
 
     }
     export interface Database extends Disposable {}
@@ -227,12 +230,13 @@ declare module 'tjs:sqlite'{
         interrupt(): void;
 
         /**
-         * See `Database.permitAttach`. Takes effect immediately, including for
-         * operations already queued.
+         * See `Database.vacuumInto`. Runs in FIFO order with the connection's
+         * other operations; operations queued before or after it never see
+         * the destination accepted.
          *
-         * @param path The one attachable path, or `null` to withdraw the permit.
+         * @param path Destination file; must not contain NUL characters.
          */
-        permitAttach(path: string | null): void;
+        vacuumInto(path: string, options?: IAsyncDatabaseOperationOptions): Promise<void>;
 
         /**
          * Wait for queued operations, then close the database. Idempotent.
