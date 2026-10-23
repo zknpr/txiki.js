@@ -185,6 +185,15 @@ declare module 'tjs:sqlite'{
          */
         loadExtension(file:string, entrypoint?:string): undefined;
 
+        /**
+         * Every connection refuses ATTACH and DETACH, including the ATTACH that
+         * VACUUM INTO performs on its destination. Only plain VACUUM's private
+         * temporary database and the path permitted here may be attached.
+         *
+         * @param path The one attachable path, or `null` to withdraw the permit.
+         */
+        permitAttach(path: string | null): void;
+
     }
     export interface Database extends Disposable {}
 
@@ -216,6 +225,14 @@ declare module 'tjs:sqlite'{
          * operation is running has no effect.
          */
         interrupt(): void;
+
+        /**
+         * See `Database.permitAttach`. Takes effect immediately, including for
+         * operations already queued.
+         *
+         * @param path The one attachable path, or `null` to withdraw the permit.
+         */
+        permitAttach(path: string | null): void;
 
         /**
          * Wait for queued operations, then close the database. Idempotent.

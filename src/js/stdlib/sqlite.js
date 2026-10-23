@@ -10,6 +10,18 @@ function busyError() {
     return Object.assign(new Error('Database is busy with another operation'), { errno: SQLITE_BUSY });
 }
 
+// Every connection refuses ATTACH (see tjs_sqlite3_authorizer) except plain
+// VACUUM's private temporary database and the one path permitted here.
+function checkAttachPermit(path) {
+    if (path === null || path === undefined) {
+        return;
+    }
+
+    if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) {
+        throw new TypeError('An ATTACH permit must be a non-empty path without NUL characters, or null');
+    }
+}
+
 class Database {
     #handle;
     #syncDepth = 0;
@@ -208,6 +220,18 @@ class Database {
 
     loadExtension(file, entrypoint=undefined) {
         return this.#runSync(() => sqlite3.load_extension(this.#handle,file,entrypoint));
+    }
+
+    permitAttach(path) {
+        checkAttachPermit(path);
+
+        return this.#runSync(() => {
+            if (!this.#handle) {
+                throw new Error('Invalid DB');
+            }
+
+            sqlite3.set_attach_permit(this.#handle, path ?? null);
+        });
     }
 }
 
@@ -445,6 +469,17 @@ class AsyncDatabase {
 
             sqlite3.interrupt(this.#handle);
         }
+    }
+
+    // Takes effect immediately, including for work already queued.
+    permitAttach(path) {
+        checkAttachPermit(path);
+
+        if (!this.#handle || this.#closing) {
+            throw new Error('Invalid DB');
+        }
+
+        sqlite3.set_attach_permit(this.#handle, path ?? null);
     }
 
     close() {

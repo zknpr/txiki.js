@@ -50,6 +50,7 @@ typedef struct {
     unsigned int async_refs;
     unsigned int stmt_refs;
     TJSSqlite3Stmt *deferred_stmts;
+    char *attach_permit;
     bool closing;
     bool finalized;
 } TJSSqlite3Handle;
@@ -65,6 +66,48 @@ static int tjs_sqlite3_progress_callback(void *opaque) {
     uv_mutex_unlock(&h->mutex);
 
     return cancelled || (deadline != 0 && uv_hrtime() >= deadline);
+}
+
+/* Path authority: ATTACH opens any file the process can reach, so every
+   connection refuses it except for two filenames. "" is the private temporary
+   database plain VACUUM attaches internally. The single path permitted through
+   set_attach_permit is the destination of the embedder's own VACUUM INTO,
+   which attaches its target the same way. VACUUM's internal ATTACH reaches
+   this callback with the dequoted target, so SQL-level VACUUM INTO any other
+   path is refused too. A filename that is not a string literal arrives as
+   NULL. DETACH has no use once ATTACH is closed.
+
+   This runs inside sqlite3_prepare and, for VACUUM, inside sqlite3_step, with
+   SQLite's connection mutex held. Taking the handle mutex here follows the
+   same lock order as the progress callback: nothing holds the handle mutex
+   while calling into SQLite with a statement able to run concurrently. */
+static int tjs_sqlite3_authorizer(void *opaque,
+                                  int action,
+                                  const char *arg1,
+                                  const char *arg2,
+                                  const char *db_name,
+                                  const char *trigger) {
+    TJSSqlite3Handle *h = opaque;
+    bool permitted;
+
+    if (action == SQLITE_DETACH) {
+        return SQLITE_DENY;
+    }
+    if (action != SQLITE_ATTACH) {
+        return SQLITE_OK;
+    }
+    if (!arg1) {
+        return SQLITE_DENY;
+    }
+    if (arg1[0] == '\0') {
+        return SQLITE_OK;
+    }
+
+    uv_mutex_lock(&h->mutex);
+    permitted = h->attach_permit && strcmp(h->attach_permit, arg1) == 0;
+    uv_mutex_unlock(&h->mutex);
+
+    return permitted ? SQLITE_OK : SQLITE_DENY;
 }
 
 static int tjs_sqlite3_close_locked(TJSSqlite3Handle *h) {
@@ -97,6 +140,7 @@ static void tjs_sqlite3_finalizer(JSRuntime *rt, JSValue val) {
     // statement references keep the lifecycle mutex alive through that order.
     if (can_free) {
         uv_mutex_destroy(&h->mutex);
+        js_free_rt(rt, h->attach_permit);
         js_free_rt(rt, h);
     }
 }
@@ -157,6 +201,7 @@ static void tjs_sqlite3_stmt_free(JSRuntime *rt, TJSSqlite3Stmt *h) {
     uv_mutex_unlock(&owner->mutex);
     if (can_free) {
         uv_mutex_destroy(&owner->mutex);
+        js_free_rt(rt, owner->attach_permit);
         js_free_rt(rt, owner);
     }
     js_free_rt(rt, h);
@@ -278,9 +323,49 @@ static JSValue tjs_sqlite3_open(JSContext *ctx, JSValue this_val, int argc, JSVa
     JSValue obj = tjs_new_sqlite3(ctx, handle);
     if (JS_IsException(obj)) {
         sqlite3_close_v2(handle);
+        return obj;
+    }
+
+    // Installed before JavaScript can reach the handle, so it covers every
+    // statement the connection compiles, including on the thread pool.
+    r = sqlite3_set_authorizer(handle, tjs_sqlite3_authorizer, JS_GetOpaque(obj, tjs_sqlite3_class_id));
+    if (r != SQLITE_OK) {
+        // The finalizer closes the handle.
+        JS_FreeValue(ctx, obj);
+        return tjs_throw_sqlite3_errno(ctx, r);
     }
 
     return obj;
+}
+
+static JSValue tjs_sqlite3_set_attach_permit(JSContext *ctx, JSValue this_val, int argc, JSValue *argv) {
+    TJSSqlite3Handle *h = tjs_sqlite3_get(ctx, argv[0]);
+    char *permit = NULL;
+
+    if (!h) {
+        return JS_EXCEPTION;
+    }
+
+    if (!JS_IsNull(argv[1]) && !JS_IsUndefined(argv[1])) {
+        const char *path = JS_ToCString(ctx, argv[1]);
+        if (!path) {
+            return JS_EXCEPTION;
+        }
+        permit = js_strdup(ctx, path);
+        JS_FreeCString(ctx, path);
+        if (!permit) {
+            return JS_EXCEPTION;
+        }
+    }
+
+    uv_mutex_lock(&h->mutex);
+    char *previous = h->attach_permit;
+    h->attach_permit = permit;
+    uv_mutex_unlock(&h->mutex);
+
+    js_free(ctx, previous);
+
+    return JS_UNDEFINED;
 }
 
 static JSValue tjs_sqlite3_close(JSContext *ctx, JSValue this_val, int argc, JSValue *argv) {
@@ -1502,6 +1587,7 @@ static JSValue tjs_sqlite3_stmt_run(JSContext *ctx, JSValue this_val, int argc, 
 static const JSCFunctionListEntry tjs_sqlite3_funcs[] = {
     TJS_CFUNC_DEF("open", 2, tjs_sqlite3_open),
     TJS_CFUNC_DEF("load_extension", 3, tjs_sqlite3_load_extension),
+    TJS_CFUNC_DEF("set_attach_permit", 2, tjs_sqlite3_set_attach_permit),
     TJS_CFUNC_DEF("close", 1, tjs_sqlite3_close),
     TJS_CFUNC_DEF("interrupt", 1, tjs_sqlite3_interrupt),
     TJS_CFUNC_DEF("cancel_async", 1, tjs_sqlite3_cancel_async),
