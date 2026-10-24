@@ -77,9 +77,9 @@ static int tjs_sqlite3_progress_callback(void *opaque) {
    connection refuses it except for two filenames. "" is the private temporary
    database plain VACUUM attaches internally. The other is the destination of
    a running vacuum_into, which attaches its target the same way; it is
-   accepted only on the thread executing that one statement and only while it
-   runs, so no other statement compiled on the connection, queued or
-   concurrent, can borrow it. VACUUM's internal ATTACH reaches this callback
+   accepted only on the thread running that call and only while it runs, so
+   no other statement compiled on the connection, queued or concurrent, can
+   borrow it (see vacuum_into_on_thread for what this relies on). VACUUM's internal ATTACH reaches this callback
    with the dequoted target, so SQL-level VACUUM INTO is refused too. A
    filename that is not a string literal arrives as NULL. DETACH has no use
    once ATTACH is closed.
@@ -130,17 +130,21 @@ static int tjs_sqlite3_authorizer(void *opaque,
    Acceptance is "this thread, during this call". That equals "this statement"
    only because nothing SQLite calls back into during the VACUUM can compile
    SQL on this connection: the module registers no SQL functions, collations,
-   hooks or busy handler, and the progress callback runs no SQL. A JavaScript
-   callback registered on the connection (sqlite3_create_function and the
-   like) could run inside this VACUUM, through an expression index for
-   example, and its nested ATTACH of the target would be accepted. Refuse
-   nested SQL during vacuum_into before adding one. Acceptance is not
-   one-shot: sqlite3_prepare retries compilation after SQLITE_SCHEMA or
-   SQLITE_ERROR_RETRY, which authorizes the internal ATTACH again.
+   hooks or busy handler, and the progress callback runs no SQL. A callback
+   registered on the connection could run inside this VACUUM, through an
+   expression index for example, and its nested ATTACH of the target would be
+   accepted. That includes JavaScript callbacks (sqlite3_create_function and
+   the like) and functions from an extension loaded with loadExtension that
+   run SQL themselves. Refuse nested SQL during vacuum_into before adding
+   either. Acceptance is not one-shot: if the VACUUM step returns
+   SQLITE_SCHEMA, sqlite3_step re-prepares it and runs OP_Vacuum again, which
+   compiles and authorizes a new internal ATTACH of the same target.
 
    On failure *errmsg receives a malloc'd copy of SQLite's message, or NULL if
    the copy fails; the caller frees it. The message belongs to the
-   connection, so it is copied here, on the thread that ran the statement. */
+   connection, so it is copied here, on the thread that ran the statement.
+   It can quote names from the database file, such as a collation, so code
+   that displays it must treat it as untrusted text. */
 static int tjs_sqlite3_vacuum_into_on_thread(TJSSqlite3Handle *h, sqlite3 *handle, const char *target, char **errmsg) {
     sqlite3_stmt *stmt = NULL;
 
