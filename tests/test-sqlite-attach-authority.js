@@ -2,6 +2,9 @@ import assert from 'tjs:assert';
 import { AsyncDatabase, Database } from 'tjs:sqlite';
 
 
+const SQLITE_ERROR = 1;
+const SQLITE_INTERRUPT = 9;
+const SQLITE_CANTOPEN = 14;
 const SQLITE_AUTH = 23;
 // CVE-2026-11822/11824 (FTS5 heap overflow) are fixed in 3.53.2.
 const MINIMUM_SQLITE_VERSION = [ 3, 53, 2 ];
@@ -32,6 +35,31 @@ async function assertDeniedAsync(promise, message) {
 
     assert.ok(error, message);
     assert.eq(error.errno, SQLITE_AUTH, `${message} (SQLITE_AUTH)`);
+}
+
+function assertFailure(error, errno, sqliteMessage, message) {
+    assert.ok(error, message);
+    assert.eq(error.errno, errno, `${message} (errno)`);
+
+    if (sqliteMessage !== undefined) {
+        assert.eq(error.message, sqliteMessage, `${message} (SQLite's message)`);
+    }
+}
+
+function caught(operation) {
+    try {
+        operation();
+    } catch (error) {
+        return error;
+    }
+}
+
+async function caughtAsync(promise) {
+    try {
+        await promise;
+    } catch (error) {
+        return error;
+    }
 }
 
 async function exists(path) {
@@ -139,7 +167,12 @@ async function asyncConnectionsAreCovered(dir) {
     assert.ok(!(await exists(deniedCopy)), 'a refused async VACUUM INTO creates no file');
 
     // Operations queued around the snapshot never see its destination
-    // accepted, including one submitted before it.
+    // accepted, including one submitted before it. The pool runs these jobs
+    // one after another, so this checks that the destination is cleared
+    // between jobs. It does not exercise the authorizer's thread check:
+    // JavaScript cannot use one connection from two threads at once
+    // (tjs:internal/core is not importable), so that check is defence in
+    // depth no test here can reach.
     const before = db.run(`ATTACH ${quote(copyPath)} AS early`, []);
     const snapshot = db.vacuumInto(copyPath);
     const after = db.run(`ATTACH ${quote(copyPath)} AS late`, []);
@@ -149,6 +182,86 @@ async function asyncConnectionsAreCovered(dir) {
     await assertDeniedAsync(after, 'an ATTACH queued after vacuumInto is refused');
     assert.ok(await exists(copyPath), 'the async vacuumInto writes its destination');
     await db.close();
+}
+
+// A failed or interrupted vacuumInto leaves no destination accepted: an ATTACH
+// of it is refused and the next vacuumInto runs. Its errors carry SQLite's
+// message, not only the generic text of their code.
+async function failuresClearTheDestination(dir) {
+    const path = `${dir}/failures.db`;
+    const existing = `${dir}/existing.db`;
+    const inTransaction = `${dir}/in-transaction.db`;
+    const interrupted = `${dir}/interrupted.db`;
+    const missingDirectory = `${dir}/missing/copy.db`;
+    const db = new Database(path, { create: true });
+
+    db.exec(`CREATE TABLE t(v);
+        WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 20000) INSERT INTO t SELECT x FROM n;`);
+    db.vacuumInto(existing);
+
+    assertFailure(
+        caught(() => db.vacuumInto(existing)),
+        SQLITE_ERROR,
+        'output file already exists',
+        'vacuumInto refuses an existing destination',
+    );
+    assertDenied(() => db.exec(`ATTACH ${quote(existing)} AS x`), 'a destination that already existed stays unattachable');
+
+    db.exec('BEGIN');
+    assertFailure(
+        caught(() => db.vacuumInto(inTransaction)),
+        SQLITE_ERROR,
+        'cannot VACUUM from within a transaction',
+        'vacuumInto fails inside a transaction',
+    );
+    db.exec('ROLLBACK');
+    assertDenied(
+        () => db.exec(`ATTACH ${quote(inTransaction)} AS x`),
+        'a destination refused inside a transaction stays unattachable',
+    );
+
+    // A zero deadline has passed before the snapshot starts, so the progress
+    // callback interrupts it once copying the table runs 1000 VDBE ops.
+    db.setQueryDeadline(0);
+    assertFailure(
+        caught(() => db.vacuumInto(interrupted)),
+        SQLITE_INTERRUPT,
+        undefined,
+        'a query deadline interrupts vacuumInto',
+    );
+    db.clearQueryDeadline();
+    assertDenied(() => db.exec(`ATTACH ${quote(interrupted)} AS x`), 'an interrupted destination stays unattachable');
+
+    db.vacuumInto(`${dir}/after-sync-failures.db`);
+    db.close();
+
+    const asyncDb = new AsyncDatabase(path);
+
+    assertFailure(
+        await caughtAsync(asyncDb.vacuumInto(existing)),
+        SQLITE_ERROR,
+        'output file already exists',
+        'async vacuumInto refuses an existing destination',
+    );
+    await assertDeniedAsync(
+        asyncDb.run(`ATTACH ${quote(existing)} AS x`, []),
+        'a destination that already existed stays unattachable on the pool',
+    );
+
+    // Accepted, this ATTACH would fail with SQLITE_CANTOPEN instead.
+    assertFailure(
+        await caughtAsync(asyncDb.vacuumInto(missingDirectory)),
+        SQLITE_CANTOPEN,
+        undefined,
+        'async vacuumInto fails without the parent directory',
+    );
+    await assertDeniedAsync(
+        asyncDb.run(`ATTACH ${quote(missingDirectory)} AS x`, []),
+        'a destination in a missing directory stays unattachable',
+    );
+
+    await asyncDb.vacuumInto(`${dir}/after-async-failures.db`);
+    await asyncDb.close();
 }
 
 async function vacuumIntoArgumentsAreValidated() {
@@ -181,6 +294,7 @@ try {
     attachIsDenied(dir);
     await onlyVacuumIntoWritesACopy(dir);
     await asyncConnectionsAreCovered(dir);
+    await failuresClearTheDestination(dir);
     await vacuumIntoArgumentsAreValidated();
 } finally {
     await tjs.remove(dir, { recursive: true });

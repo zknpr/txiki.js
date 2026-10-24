@@ -34,6 +34,8 @@
 static JSClassID tjs_sqlite3_class_id;
 typedef struct TJSSqlite3Stmt TJSSqlite3Stmt;
 
+static void *tjs_sqlite3_raw_copy(const void *data, size_t length, bool terminate);
+
 static JSValue tjs_sqlite3_new_integer(JSContext *ctx, int64_t value) {
     if (value < -INT64_C(9007199254740991) || value > INT64_C(9007199254740991)) {
         return JS_NewBigInt64(ctx, value);
@@ -93,7 +95,6 @@ static int tjs_sqlite3_authorizer(void *opaque,
                                   const char *db_name,
                                   const char *trigger) {
     TJSSqlite3Handle *h = opaque;
-    uv_thread_t self = uv_thread_self();
     bool permitted;
 
     if (action == SQLITE_DETACH) {
@@ -109,6 +110,12 @@ static int tjs_sqlite3_authorizer(void *opaque,
         return SQLITE_OK;
     }
 
+    /* Only an ATTACH of a named file gets here, so the callbacks for every
+       other action skip uv_thread_self. On Windows its first call on a thread
+       libuv did not create, such as the main thread, duplicates a handle and
+       aborts the process if that fails. */
+    uv_thread_t self = uv_thread_self();
+
     uv_mutex_lock(&h->mutex);
     permitted = h->vacuum_target && uv_thread_equal(&h->vacuum_thread, &self) && strcmp(h->vacuum_target, arg1) == 0;
     uv_mutex_unlock(&h->mutex);
@@ -117,10 +124,27 @@ static int tjs_sqlite3_authorizer(void *opaque,
 }
 
 /* VACUUM main INTO target on the calling thread, with the target accepted by
-   the authorizer for exactly this statement. The SQL is fixed, so the
-   exception cannot be used for anything but this snapshot. */
-static int tjs_sqlite3_vacuum_into_on_thread(TJSSqlite3Handle *h, sqlite3 *handle, const char *target) {
+   the authorizer while this call runs. The SQL is fixed, so the exception
+   cannot be used for anything but this snapshot.
+
+   Acceptance is "this thread, during this call". That equals "this statement"
+   only because nothing SQLite calls back into during the VACUUM can compile
+   SQL on this connection: the module registers no SQL functions, collations,
+   hooks or busy handler, and the progress callback runs no SQL. A JavaScript
+   callback registered on the connection (sqlite3_create_function and the
+   like) could run inside this VACUUM, through an expression index for
+   example, and its nested ATTACH of the target would be accepted. Refuse
+   nested SQL during vacuum_into before adding one. Acceptance is not
+   one-shot: sqlite3_prepare retries compilation after SQLITE_SCHEMA or
+   SQLITE_ERROR_RETRY, which authorizes the internal ATTACH again.
+
+   On failure *errmsg receives a malloc'd copy of SQLite's message, or NULL if
+   the copy fails; the caller frees it. The message belongs to the
+   connection, so it is copied here, on the thread that ran the statement. */
+static int tjs_sqlite3_vacuum_into_on_thread(TJSSqlite3Handle *h, sqlite3 *handle, const char *target, char **errmsg) {
     sqlite3_stmt *stmt = NULL;
+
+    *errmsg = NULL;
 
     uv_mutex_lock(&h->mutex);
     if (h->vacuum_target) {
@@ -146,6 +170,12 @@ static int tjs_sqlite3_vacuum_into_on_thread(TJSSqlite3Handle *h, sqlite3 *handl
         if (r == SQLITE_OK && finalize_r != SQLITE_OK) {
             r = finalize_r;
         }
+    }
+    if (r != SQLITE_OK) {
+        // "output file already exists", for example; sqlite3_errstr(r) would
+        // only say "SQL logic error".
+        const char *message = sqlite3_errmsg(handle);
+        *errmsg = tjs_sqlite3_raw_copy(message, strlen(message), true);
     }
 
     uv_mutex_lock(&h->mutex);
@@ -302,7 +332,9 @@ static TJSSqlite3Stmt *tjs_sqlite3_stmt_get(JSContext *ctx, JSValue obj) {
     return JS_GetOpaque2(ctx, obj, tjs_sqlite3_stmt_class_id);
 }
 
-static JSValue tjs_new_sqlite3_error(JSContext *ctx, int err) {
+/* message is SQLite's own text for the failure when the caller has it, or
+   NULL for the generic text of err. */
+static JSValue tjs_new_sqlite3_error_with_message(JSContext *ctx, int err, const char *message) {
     JSValue obj = JS_NewError(ctx);
     if (JS_IsException(obj)) {
         return obj;
@@ -311,7 +343,7 @@ static JSValue tjs_new_sqlite3_error(JSContext *ctx, int err) {
     if (JS_DefinePropertyValueStr(ctx,
                                   obj,
                                   "message",
-                                  JS_NewString(ctx, sqlite3_errstr(err)),
+                                  JS_NewString(ctx, message ? message : sqlite3_errstr(err)),
                                   JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE) < 0 ||
         JS_DefinePropertyValueStr(ctx, obj, "errno", JS_NewInt32(ctx, err), JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE) <
             0) {
@@ -321,12 +353,16 @@ static JSValue tjs_new_sqlite3_error(JSContext *ctx, int err) {
     return obj;
 }
 
-JSValue tjs_throw_sqlite3_errno(JSContext *ctx, int err) {
-    JSValue obj = tjs_new_sqlite3_error(ctx, err);
+static JSValue tjs_throw_sqlite3_error_with_message(JSContext *ctx, int err, const char *message) {
+    JSValue obj = tjs_new_sqlite3_error_with_message(ctx, err, message);
     if (JS_IsException(obj)) {
         return obj;
     }
     return JS_Throw(ctx, obj);
+}
+
+JSValue tjs_throw_sqlite3_errno(JSContext *ctx, int err) {
+    return tjs_throw_sqlite3_error_with_message(ctx, err, NULL);
 }
 
 static JSValue tjs_sqlite3_open(JSContext *ctx, JSValue this_val, int argc, JSValue *argv) {
@@ -398,16 +434,19 @@ static JSValue tjs_sqlite3_vacuum_into(JSContext *ctx, JSValue this_val, int arg
     uv_mutex_unlock(&h->mutex);
 
     int r;
+    char *errmsg = NULL;
     if (!handle) {
         JS_FreeCString(ctx, target);
         return JS_ThrowInternalError(ctx, "Database is closed");
     }
     // A primary connection lent to the thread pool is busy until it returns.
-    r = lent ? SQLITE_BUSY : tjs_sqlite3_vacuum_into_on_thread(h, handle, target);
+    r = lent ? SQLITE_BUSY : tjs_sqlite3_vacuum_into_on_thread(h, handle, target, &errmsg);
     JS_FreeCString(ctx, target);
 
     if (r != SQLITE_OK) {
-        return tjs_throw_sqlite3_errno(ctx, r);
+        JSValue ret = tjs_throw_sqlite3_error_with_message(ctx, r, errmsg);
+        free(errmsg);
+        return ret;
     }
 
     return JS_UNDEFINED;
@@ -690,11 +729,19 @@ static JSValue tjs_sqlite3_stmt_expand(JSContext *ctx, JSValue this_val, int arg
 
 static JSValue tjs__stmt2obj(JSContext *ctx, TJSSqlite3Stmt *h) {
     JSValue obj = JS_NewObjectProto(ctx, JS_NULL);
+    if (JS_IsException(obj)) {
+        return obj;
+    }
     int count = sqlite3_column_count(h->stmt);
 
     for (int i = 0; i < count; i++) {
         const char *name = sqlite3_column_name(h->stmt, i);
         JSValue value;
+
+        if (!name) {
+            JS_FreeValue(ctx, obj);
+            return JS_ThrowOutOfMemory(ctx);
+        }
 
         switch (sqlite3_column_type(h->stmt, i)) {
             case SQLITE_INTEGER: {
@@ -725,11 +772,10 @@ static JSValue tjs__stmt2obj(JSContext *ctx, TJSSqlite3Stmt *h) {
             }
         }
 
-        if (JS_IsException(value)) {
+        if (JS_IsException(value) || JS_DefinePropertyValueStr(ctx, obj, name, value, JS_PROP_C_W_E) < 0) {
             JS_FreeValue(ctx, obj);
-            return value;
+            return JS_EXCEPTION;
         }
-        JS_DefinePropertyValueStr(ctx, obj, name, value, JS_PROP_C_W_E);
     }
 
     return obj;
@@ -917,6 +963,9 @@ typedef struct {
     bool named_params;
     bool all;
     int r;
+    /* SQLite's message for r, copied on the worker thread; NULL for the
+       generic text. Only vacuum_into sets it. */
+    char *errmsg;
     char **column_names;
     int column_count;
     TJSSqlite3RawRow *rows;
@@ -944,6 +993,7 @@ static void tjs_sqlite3_raw_values_free(TJSSqlite3RawValue *values, size_t count
 static void tjs_sqlite3_async_req_free(TJSSqlite3AsyncReq *ar) {
     free(ar->sql);
     free(ar->vacuum_target);
+    free(ar->errmsg);
     tjs_sqlite3_raw_values_free(ar->params, ar->param_count);
     if (ar->column_names) {
         for (int i = 0; i < ar->column_count; i++) {
@@ -1327,7 +1377,7 @@ static void tjs_sqlite3_async_work(uv_work_t *req) {
     }
 
     if (ar->vacuum_target) {
-        ar->r = tjs_sqlite3_vacuum_into_on_thread(owner, ar->handle, ar->vacuum_target);
+        ar->r = tjs_sqlite3_vacuum_into_on_thread(owner, ar->handle, ar->vacuum_target, &ar->errmsg);
         return;
     }
 
@@ -1452,7 +1502,7 @@ static void tjs_sqlite3_async_after_work(uv_work_t *req, int status) {
         arg = tjs_new_error(ctx, status);
         reject = true;
     } else if (ar->r != SQLITE_OK) {
-        arg = tjs_new_sqlite3_error(ctx, ar->r);
+        arg = tjs_new_sqlite3_error_with_message(ctx, ar->r, ar->errmsg);
         reject = true;
     } else if (ar->all) {
         arg = tjs_sqlite3_async_rows_to_js(ctx, ar);
@@ -1611,15 +1661,21 @@ static JSValue tjs_sqlite3_stmt_all(JSContext *ctx, JSValue this_val, int argc, 
     }
 
     JSValue result = JS_NewArray(ctx);
+    if (JS_IsException(result)) {
+        return result;
+    }
     uint32_t i = 0;
 
     while ((r = sqlite3_step(h->stmt)) == SQLITE_ROW) {
         JSValue row = tjs__stmt2obj(ctx, h);
-        if (JS_IsException(row)) {
+        if (JS_IsException(row) || JS_DefinePropertyValueUint32(ctx, result, i, row, JS_PROP_C_W_E) < 0) {
+            /* Left mid-step, the statement would keep its read transaction
+               open, blocking writers, WAL checkpoints and VACUUM until it is
+               reused or finalized. */
+            sqlite3_reset(h->stmt);
             JS_FreeValue(ctx, result);
-            return row;
+            return JS_EXCEPTION;
         }
-        JS_DefinePropertyValueUint32(ctx, result, i, row, JS_PROP_C_W_E);
         i++;
     }
 
