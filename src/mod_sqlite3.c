@@ -692,18 +692,11 @@ static JSValue tjs_sqlite3_stmt_finalize(JSContext *ctx, JSValue this_val, int a
         return JS_UNDEFINED;
     }
 
-    int reset_r = sqlite3_reset(h->stmt);
-    int finalize_r = sqlite3_finalize(h->stmt);
+    // Both return the error of the statement's last step, which the call that
+    // ran it has already thrown.
+    sqlite3_reset(h->stmt);
+    sqlite3_finalize(h->stmt);
     h->stmt = NULL;
-
-    if (reset_r != SQLITE_OK) {
-        return tjs_throw_sqlite3_errno(ctx, reset_r);
-    }
-
-    int r = finalize_r;
-    if (r != SQLITE_OK) {
-        return tjs_throw_sqlite3_errno(ctx, r);
-    }
 
     return JS_UNDEFINED;
 }
@@ -1651,10 +1644,9 @@ static JSValue tjs_sqlite3_stmt_all(JSContext *ctx, JSValue this_val, int argc, 
         return JS_ThrowInternalError(ctx, "Statement has been finalized");
     }
 
-    int r = sqlite3_reset(h->stmt);
-    if (r != SQLITE_OK) {
-        return tjs_throw_sqlite3_errno(ctx, r);
-    }
+    // sqlite3_reset returns the error of the previous step, which the previous
+    // call has already thrown; it is not a failure of this call.
+    sqlite3_reset(h->stmt);
 
     if (argc == 2) {
         JSValue params = argv[1];
@@ -1669,6 +1661,7 @@ static JSValue tjs_sqlite3_stmt_all(JSContext *ctx, JSValue this_val, int argc, 
         return result;
     }
     uint32_t i = 0;
+    int r;
 
     while ((r = sqlite3_step(h->stmt)) == SQLITE_ROW) {
         JSValue row = tjs__stmt2obj(ctx, h);
@@ -1702,10 +1695,9 @@ static JSValue tjs_sqlite3_stmt_run(JSContext *ctx, JSValue this_val, int argc, 
         return JS_ThrowInternalError(ctx, "Statement has been finalized");
     }
 
-    int r = sqlite3_reset(h->stmt);
-    if (r != SQLITE_OK) {
-        return tjs_throw_sqlite3_errno(ctx, r);
-    }
+    // sqlite3_reset returns the error of the previous step, which the previous
+    // call has already thrown; it is not a failure of this call.
+    sqlite3_reset(h->stmt);
 
     if (argc == 2) {
         JSValue params = argv[1];
@@ -1715,7 +1707,7 @@ static JSValue tjs_sqlite3_stmt_run(JSContext *ctx, JSValue this_val, int argc, 
         }
     }
 
-    r = sqlite3_step(h->stmt);
+    int r = sqlite3_step(h->stmt);
     if (r != SQLITE_OK && r != SQLITE_DONE && r != SQLITE_ROW) {
         return tjs_throw_sqlite3_errno(ctx, r);
     }
