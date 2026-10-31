@@ -36,6 +36,34 @@ typedef struct TJSSqlite3Stmt TJSSqlite3Stmt;
 
 static void *tjs_sqlite3_raw_copy(const void *data, size_t length, bool terminate);
 
+/* A malloc'd copy of SQLite's message for the failure err, such as "no such
+   table: x" where the generic text of err is "SQL logic error". NULL means
+   the generic text: the copy failed, or the connection's last call did not
+   fail with err, so its message describes something else (a failure this
+   module detected itself, or a call that succeeded). The connection mutex
+   keeps the message alive while it is copied.
+
+   The message can quote SQL and names from the database file, so code that
+   displays it must treat it as untrusted text. */
+static char *tjs_sqlite3_errmsg_copy(sqlite3 *handle, int err) {
+    // SQLite refuses a closed (NULL) connection with SQLITE_MISUSE, but
+    // sqlite3_db_mutex would dereference it.
+    if (!handle) {
+        return NULL;
+    }
+
+    char *copy = NULL;
+    sqlite3_mutex *mutex = sqlite3_db_mutex(handle);
+
+    sqlite3_mutex_enter(mutex);
+    if (sqlite3_errcode(handle) == err) {
+        const char *message = sqlite3_errmsg(handle);
+        copy = tjs_sqlite3_raw_copy(message, strlen(message), true);
+    }
+    sqlite3_mutex_leave(mutex);
+    return copy;
+}
+
 static JSValue tjs_sqlite3_new_integer(JSContext *ctx, int64_t value) {
     if (value < -INT64_C(9007199254740991) || value > INT64_C(9007199254740991)) {
         return JS_NewBigInt64(ctx, value);
@@ -140,11 +168,9 @@ static int tjs_sqlite3_authorizer(void *opaque,
    SQLITE_SCHEMA, sqlite3_step re-prepares it and runs OP_Vacuum again, which
    compiles and authorizes a new internal ATTACH of the same target.
 
-   On failure *errmsg receives a malloc'd copy of SQLite's message, or NULL if
-   the copy fails; the caller frees it. The message belongs to the
-   connection, so it is copied here, on the thread that ran the statement.
-   It can quote names from the database file, such as a collation, so code
-   that displays it must treat it as untrusted text. */
+   On failure *errmsg receives tjs_sqlite3_errmsg_copy's result, which the
+   caller frees. The message belongs to the connection, so it is copied here,
+   on the thread that ran the statement. */
 static int tjs_sqlite3_vacuum_into_on_thread(TJSSqlite3Handle *h, sqlite3 *handle, const char *target, char **errmsg) {
     sqlite3_stmt *stmt = NULL;
 
@@ -176,10 +202,8 @@ static int tjs_sqlite3_vacuum_into_on_thread(TJSSqlite3Handle *h, sqlite3 *handl
         }
     }
     if (r != SQLITE_OK) {
-        // "output file already exists", for example; sqlite3_errstr(r) would
-        // only say "SQL logic error".
-        const char *message = sqlite3_errmsg(handle);
-        *errmsg = tjs_sqlite3_raw_copy(message, strlen(message), true);
+        // "output file already exists", for example.
+        *errmsg = tjs_sqlite3_errmsg_copy(handle, r);
     }
 
     uv_mutex_lock(&h->mutex);
@@ -367,6 +391,16 @@ static JSValue tjs_throw_sqlite3_error_with_message(JSContext *ctx, int err, con
 
 JSValue tjs_throw_sqlite3_errno(JSContext *ctx, int err) {
     return tjs_throw_sqlite3_error_with_message(ctx, err, NULL);
+}
+
+/* Throws err with the message the connection reported for it. The message is
+   copied before any JavaScript allocation, which can run finalizers that use
+   the connection. */
+static JSValue tjs_throw_sqlite3_handle_error(JSContext *ctx, sqlite3 *handle, int err) {
+    char *message = tjs_sqlite3_errmsg_copy(handle, err);
+    JSValue ret = tjs_throw_sqlite3_error_with_message(ctx, err, message);
+    free(message);
+    return ret;
 }
 
 static JSValue tjs_sqlite3_open(JSContext *ctx, JSValue this_val, int argc, JSValue *argv) {
@@ -635,7 +669,7 @@ static JSValue tjs_sqlite3_exec(JSContext *ctx, JSValue this_val, int argc, JSVa
     JS_FreeCString(ctx, sql);
 
     if (r != SQLITE_OK) {
-        return tjs_throw_sqlite3_errno(ctx, r);
+        return tjs_throw_sqlite3_handle_error(ctx, h->handle, r);
     }
 
     return JS_UNDEFINED;
@@ -660,7 +694,7 @@ static JSValue tjs_sqlite3_prepare(JSContext *ctx, JSValue this_val, int argc, J
     JS_FreeCString(ctx, sql);
 
     if (r != SQLITE_OK) {
-        return tjs_throw_sqlite3_errno(ctx, r);
+        return tjs_throw_sqlite3_handle_error(ctx, h->handle, r);
     }
 
     JSValue obj = tjs_new_sqlite3_stmt(ctx, stmt, h);
@@ -961,7 +995,7 @@ typedef struct {
     bool all;
     int r;
     /* SQLite's message for r, copied on the worker thread; NULL for the
-       generic text. Only vacuum_into sets it. */
+       generic text. */
     char *errmsg;
     char **column_names;
     int column_count;
@@ -1408,6 +1442,12 @@ static void tjs_sqlite3_async_work(uv_work_t *req) {
             ar->r = finalize_r;
         }
     }
+    // Finalizing a statement whose step failed reports the same error again
+    // and keeps its message. Close is deferred while this request runs, so
+    // the connection is still open.
+    if (ar->r != SQLITE_OK) {
+        ar->errmsg = tjs_sqlite3_errmsg_copy(ar->handle, ar->r);
+    }
 }
 
 static JSValue tjs_sqlite3_async_rows_to_js(JSContext *ctx, const TJSSqlite3AsyncReq *ar) {
@@ -1677,8 +1717,9 @@ static JSValue tjs_sqlite3_stmt_all(JSContext *ctx, JSValue this_val, int argc, 
     }
 
     if (r != SQLITE_OK && r != SQLITE_DONE) {
+        JSValue ret = tjs_throw_sqlite3_handle_error(ctx, sqlite3_db_handle(h->stmt), r);
         JS_FreeValue(ctx, result);
-        return tjs_throw_sqlite3_errno(ctx, r);
+        return ret;
     }
 
     return result;
@@ -1709,7 +1750,7 @@ static JSValue tjs_sqlite3_stmt_run(JSContext *ctx, JSValue this_val, int argc, 
 
     int r = sqlite3_step(h->stmt);
     if (r != SQLITE_OK && r != SQLITE_DONE && r != SQLITE_ROW) {
-        return tjs_throw_sqlite3_errno(ctx, r);
+        return tjs_throw_sqlite3_handle_error(ctx, sqlite3_db_handle(h->stmt), r);
     }
 
     return JS_UNDEFINED;

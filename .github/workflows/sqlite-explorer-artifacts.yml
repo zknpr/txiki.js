@@ -70,6 +70,7 @@ jobs:
           ./build/tjs run tests/test-sqlite-text-nul.js
           ./build/tjs run tests/test-sqlite-row-conversion.js
           ./build/tjs run tests/test-sqlite-statement-reuse.js
+          ./build/tjs run tests/test-sqlite-error-message.js
           ./build/tjs run tests/test-dispose-database.js
           ./build/tjs run tests/test-dispose-statement.js
           ./build/tjs run tests/test-v8.js
@@ -123,7 +124,7 @@ jobs:
       - name: Verify SQLite and V8 contracts
         timeout-minutes: 2
         run: |
-          $runtimeTests = @('test-sqlite-interrupt.js', 'test-sqlite-primary-async.js', 'test-sqlite-attach-authority.js', 'test-sqlite-text-nul.js', 'test-sqlite-row-conversion.js', 'test-sqlite-statement-reuse.js', 'test-dispose-database.js', 'test-dispose-statement.js', 'test-v8.js')
+          $runtimeTests = @('test-sqlite-interrupt.js', 'test-sqlite-primary-async.js', 'test-sqlite-attach-authority.js', 'test-sqlite-text-nul.js', 'test-sqlite-row-conversion.js', 'test-sqlite-statement-reuse.js', 'test-sqlite-error-message.js', 'test-dispose-database.js', 'test-dispose-statement.js', 'test-v8.js')
           foreach ($runtimeTest in $runtimeTests) {
             & ./build/Release/tjs.exe run "tests/$runtimeTest"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
