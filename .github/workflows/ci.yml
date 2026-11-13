@@ -18,14 +18,16 @@ jobs:
       with:
         check-latest: true
         node-version-file: '.nvmrc'
+    - name: Install pnpm
+      run: npm install -g "$(node -p 'require("./package.json").packageManager')"
     - name: Install dependencies
       run: |
-        npm install
+        pnpm install --frozen-lockfile
         sudo apt update
         sudo apt install -y clang-format
         clang-format --version
     - name: Run the linter
-      run: npm run lint
+      run: pnpm run lint
     - name: Run the formatter
       run: clang-format -i src/*.{c,h}
     - name: Check if the tree is dirty
@@ -44,9 +46,11 @@ jobs:
         with:
           check-latest: true
           node-version-file: '.nvmrc'
+      - name: Install pnpm
+        run: npm install -g "$(node -p 'require("./package.json").packageManager')"
       - name: Install dependencies
         run: |
-          npm install
+          pnpm install --frozen-lockfile
       - name: Build it
         run: |
           make js
@@ -74,6 +78,8 @@ jobs:
     - uses: actions/setup-node@v7
       with:
         node-version-file: '.nvmrc'
+    - name: Install pnpm
+      run: npm install -g "$(node -p 'require("./package.json").packageManager')"
     - name: Dependencies
       env:
         ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'
@@ -90,8 +96,9 @@ jobs:
     - name: Download esbuild
       # The download is normally 1-9s; cap it so a hung or misbehaving fetch
       # (e.g. the intermittent lws pollfd assertion on Windows) fails fast
-      # instead of stalling the job.
-      timeout-minutes: 0.5
+      # instead of stalling the job. timeout-minutes must be a whole number;
+      # the runner truncates fractions (0.5 -> 0 = no timeout).
+      timeout-minutes: 2
       run: ./build/tjs bundle tests/helpers/bundle-input.js /tmp/warm.js && rm -f /tmp/warm.js
     - name: Test it
       run: make test
@@ -119,13 +126,16 @@ jobs:
     - uses: actions/setup-node@v7
       with:
         node-version-file: '.nvmrc'
+    - name: Install pnpm
+      run: npm install -g "$(node -p 'require("./package.json").packageManager')"
     - name: Build it
       run: make VERBOSE=1
     - name: Download esbuild
       # The download is normally 1-9s; cap it so a hung or misbehaving fetch
       # (e.g. the intermittent lws pollfd assertion on Windows) fails fast
-      # instead of stalling the job.
-      timeout-minutes: 0.5
+      # instead of stalling the job. timeout-minutes must be a whole number;
+      # the runner truncates fractions (0.5 -> 0 = no timeout).
+      timeout-minutes: 2
       run: ./build/tjs bundle tests/helpers/bundle-input.js /tmp/warm.js && rm -f /tmp/warm.js
     - name: Test it
       run: make test
@@ -152,16 +162,16 @@ jobs:
     - uses: mlugg/setup-zig@v2
       with:
         version: 0.16.0
-    - uses: actions/setup-node@v7
-      with:
-        node-version-file: '.nvmrc'
+    # No setup-node here: nothing in this job needs Node, and setup-node's
+    # glibc binaries can't run on musl anyway.
     - name: Build it
       run: make VERBOSE=1 TJS_ZIG_TARGET=x86_64-linux-musl
     - name: Download esbuild
       # The download is normally 1-9s; cap it so a hung or misbehaving fetch
       # (e.g. the intermittent lws pollfd assertion on Windows) fails fast
-      # instead of stalling the job.
-      timeout-minutes: 0.5
+      # instead of stalling the job. timeout-minutes must be a whole number;
+      # the runner truncates fractions (0.5 -> 0 = no timeout).
+      timeout-minutes: 2
       run: ./build/tjs bundle tests/helpers/bundle-input.js /tmp/warm.js && rm -f /tmp/warm.js
     - name: Test it
       run: make test
@@ -213,8 +223,9 @@ jobs:
     - name: Download esbuild
       # The download is normally 1-9s; cap it so a hung or misbehaving fetch
       # (e.g. the intermittent lws pollfd assertion on Windows) fails fast
-      # instead of stalling the job.
-      timeout-minutes: 0.5
+      # instead of stalling the job. timeout-minutes must be a whole number;
+      # the runner truncates fractions (0.5 -> 0 = no timeout).
+      timeout-minutes: 2
       run: |
         $env:PATH = "${{ github.workspace }}\build\${{ matrix.buildType }};${{ github.workspace }}\vcpkg\installed\x64-windows\bin;$env:PATH"
         .\build\${{ matrix.buildType }}\tjs.exe bundle tests\helpers\bundle-input.js $env:TEMP\warm.js
@@ -281,8 +292,9 @@ jobs:
     - name: Download esbuild
       # The download is normally 1-9s; cap it so a hung or misbehaving fetch
       # (e.g. the intermittent lws pollfd assertion on Windows) fails fast
-      # instead of stalling the job.
-      timeout-minutes: 0.5
+      # instead of stalling the job. timeout-minutes must be a whole number;
+      # the runner truncates fractions (0.5 -> 0 = no timeout).
+      timeout-minutes: 2
       run: ./build/tjs bundle tests/helpers/bundle-input.js /tmp/warm.js && rm -f /tmp/warm.js
     - name: Test
       run: ./build/tjs --stack-size 8388608 --wasm-stack-size 2097152 test tests/
@@ -308,8 +320,9 @@ jobs:
     - name: Download esbuild
       # The download is normally 1-9s; cap it so a hung or misbehaving fetch
       # (e.g. the intermittent lws pollfd assertion on Windows) fails fast
-      # instead of stalling the job.
-      timeout-minutes: 0.5
+      # instead of stalling the job. timeout-minutes must be a whole number;
+      # the runner truncates fractions (0.5 -> 0 = no timeout).
+      timeout-minutes: 2
       run: ./build/tjs bundle tests/helpers/bundle-input.js /tmp/warm.js && rm -f /tmp/warm.js
     - name: Test
       run: ./build/tjs --stack-size 8388608 --wasm-stack-size 2097152 test tests/
@@ -349,10 +362,12 @@ jobs:
     - name: Build
       run: cmake --build build --config RelWithDebInfo
     - name: Download esbuild
-      # The download is normally 1-9s; cap it so a hung or misbehaving fetch
-      # (e.g. the intermittent lws pollfd assertion on Windows) fails fast
-      # instead of stalling the job.
-      timeout-minutes: 0.5
+      # Cap it so a hung or misbehaving fetch (e.g. the intermittent lws pollfd
+      # assertion on Windows) fails fast instead of stalling the job. Under
+      # ASAN on Windows the download normally takes 75-99s, so this step gets
+      # more headroom than the others. timeout-minutes must be a whole number;
+      # the runner truncates fractions (0.5 -> 0 = no timeout).
+      timeout-minutes: 5
       run: |
         $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
         $clangDir = Get-ChildItem "$vsPath\VC\Tools\MSVC\*\bin\Hostx64\x64" -Directory | Select-Object -Last 1
@@ -395,8 +410,9 @@ jobs:
     - name: Download esbuild
       # The download is normally 1-9s; cap it so a hung or misbehaving fetch
       # (e.g. the intermittent lws pollfd assertion on Windows) fails fast
-      # instead of stalling the job.
-      timeout-minutes: 0.5
+      # instead of stalling the job. timeout-minutes must be a whole number;
+      # the runner truncates fractions (0.5 -> 0 = no timeout).
+      timeout-minutes: 2
       run: ./build/tjs bundle tests/helpers/bundle-input.js /tmp/warm.js && rm -f /tmp/warm.js
     - name: Test
       env:
@@ -422,8 +438,9 @@ jobs:
     - name: Download esbuild
       # The download is normally 1-9s; cap it so a hung or misbehaving fetch
       # (e.g. the intermittent lws pollfd assertion on Windows) fails fast
-      # instead of stalling the job.
-      timeout-minutes: 0.5
+      # instead of stalling the job. timeout-minutes must be a whole number;
+      # the runner truncates fractions (0.5 -> 0 = no timeout).
+      timeout-minutes: 2
       run: ./build/tjs bundle tests/helpers/bundle-input.js /tmp/warm.js && rm -f /tmp/warm.js
     - name: Test
       env:

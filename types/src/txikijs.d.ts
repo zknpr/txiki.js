@@ -1,3 +1,6 @@
+/// <reference lib="dom" />
+/// <reference lib="esnext.disposable" />
+
 /**
  * The main txiki.js APIs are exposed as a single `tjs` global object.
  *
@@ -1170,7 +1173,9 @@ declare global {
              * If `true`, also serve HTTP/3 over QUIC (UDP) on the same port and
              * advertise it to HTTP/1.1 and HTTP/2 clients with an `Alt-Svc`
              * response header. Requires {@link tls} (QUIC is always TLS 1.3).
-             * Defaults to `false`.
+             * With `port: 0`, if the UDP side of the auto-assigned port can't be
+             * bound, the server picks another port so TCP and UDP still share
+             * one port. Defaults to `false`.
              */
             http3?: boolean;
         }
@@ -1600,6 +1605,10 @@ declare global {
         reuseAddr?: boolean;
         /** Restrict an `AF_INET6` socket to IPv6 only. */
         ipv6Only?: boolean;
+        /**
+         * Enable sending to broadcast addresses (`SO_BROADCAST`). Default is false.
+         */
+        broadcast?: boolean;
         /**
          * TTL for multicast packets. Each router hop decrements this value. Default is 1.
          */

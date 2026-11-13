@@ -85,16 +85,23 @@ const NodeDelegate = struct {
 
 const arrayBufferViewToSlice = v8_serialize.arrayBufferViewToSlice;
 
-var serializer_class_id: c.JSClassID = 0;
-var deserializer_class_id: c.JSClassID = 0;
+// Class ids are per runtime: QuickJS numbers each runtime's classes on its own,
+// so a process-wide id taken from the main runtime collides in a Worker's.
+fn serializerClassId(ctx: ?*c.JSContext) c.JSClassID {
+    return c.tjs__v8_class_id(ctx, c.TJS_V8_CLASS_SERIALIZER);
+}
+
+fn deserializerClassId(ctx: ?*c.JSContext) c.JSClassID {
+    return c.tjs__v8_class_id(ctx, c.TJS_V8_CLASS_DESERIALIZER);
+}
 
 fn getSerializer(ctx: ?*c.JSContext, value: c.JSValueConst) ?*Serializer {
-    const opaque_ptr = c.JS_GetOpaque2(ctx, value, serializer_class_id) orelse return null;
+    const opaque_ptr = c.JS_GetOpaque2(ctx, value, serializerClassId(ctx)) orelse return null;
     return @ptrCast(@alignCast(opaque_ptr));
 }
 
 fn getDeserializer(ctx: ?*c.JSContext, value: c.JSValueConst) ?*Deserializer {
-    const opaque_ptr = c.JS_GetOpaque2(ctx, value, deserializer_class_id) orelse return null;
+    const opaque_ptr = c.JS_GetOpaque2(ctx, value, deserializerClassId(ctx)) orelse return null;
     return @ptrCast(@alignCast(opaque_ptr));
 }
 
@@ -136,7 +143,7 @@ fn jsSerializerConstructor(ctx: ?*c.JSContext, new_target: c.JSValueConst, argc:
     if (c.JS_IsException(proto)) return z.JS_EXCEPTION;
     defer c.JS_FreeValue(ctx, proto);
 
-    const obj = c.JS_NewObjectProtoClass(ctx, proto, serializer_class_id);
+    const obj = c.JS_NewObjectProtoClass(ctx, proto, serializerClassId(ctx));
     if (c.JS_IsException(obj)) return z.JS_EXCEPTION;
 
     const ser: *Serializer = initSerializer(ctx, obj) catch |err| switch (err) {
@@ -166,8 +173,8 @@ fn jsSerializerConstructor(ctx: ?*c.JSContext, new_target: c.JSValueConst, argc:
     return obj;
 }
 
-fn jsSerializerFinalizer(_: ?*c.JSRuntime, this_val: c.JSValue) callconv(.c) void {
-    const opaque_ptr = c.JS_GetOpaque(this_val, serializer_class_id) orelse return;
+fn jsSerializerFinalizer(rt: ?*c.JSRuntime, this_val: c.JSValue) callconv(.c) void {
+    const opaque_ptr = c.JS_GetOpaque(this_val, c.tjs__v8_class_id_rt(rt, c.TJS_V8_CLASS_SERIALIZER)) orelse return;
     const ser: *Serializer = @ptrCast(@alignCast(opaque_ptr));
     ser.deinit();
     ser.ac.destroy(ser);
@@ -288,7 +295,7 @@ fn jsDeserializerConstructor(ctx: ?*c.JSContext, new_target: c.JSValueConst, arg
     if (c.JS_IsException(proto)) return z.JS_EXCEPTION;
     defer c.JS_FreeValue(ctx, proto);
 
-    const obj = c.JS_NewObjectProtoClass(ctx, proto, deserializer_class_id);
+    const obj = c.JS_NewObjectProtoClass(ctx, proto, deserializerClassId(ctx));
     if (c.JS_IsException(obj)) return z.JS_EXCEPTION;
 
     const des: *Deserializer = initDeserializer(ctx, obj, argv[0]) catch |err| switch (err) {
@@ -316,8 +323,8 @@ fn jsDeserializerConstructor(ctx: ?*c.JSContext, new_target: c.JSValueConst, arg
     return obj;
 }
 
-fn jsDeserializerFinalizer(_: ?*c.JSRuntime, this_val: c.JSValue) callconv(.c) void {
-    const opaque_ptr = c.JS_GetOpaque(this_val, deserializer_class_id) orelse return;
+fn jsDeserializerFinalizer(rt: ?*c.JSRuntime, this_val: c.JSValue) callconv(.c) void {
+    const opaque_ptr = c.JS_GetOpaque(this_val, c.tjs__v8_class_id_rt(rt, c.TJS_V8_CLASS_DESERIALIZER)) orelse return;
     const des: *Deserializer = @ptrCast(@alignCast(opaque_ptr));
     des.deinit();
     des.ac.destroy(des);
@@ -427,10 +434,7 @@ const deserializer_proto_funcs = [_]c.JSCFunctionListEntry{
 };
 
 pub fn initModV8Compat(ctx: ?*c.JSContext, ns: c.JSValue) c_int {
-    const rt = c.JS_GetRuntime(ctx);
-
-    _ = c.JS_NewClassID(rt, &serializer_class_id);
-    if (c.JS_NewClass(rt, serializer_class_id, &serializer_class) < 0) return -1;
+    if (c.tjs__v8_class_register(ctx, c.TJS_V8_CLASS_SERIALIZER, &serializer_class) < 0) return -1;
 
     const ser_proto = c.JS_NewObject(ctx);
     if (c.JS_IsException(ser_proto)) return -1;
@@ -449,11 +453,10 @@ pub fn initModV8Compat(ctx: ?*c.JSContext, ns: c.JSValue) c_int {
         c.JS_FreeValue(ctx, ser_proto);
         return -1;
     }
-    c.JS_SetClassProto(ctx, serializer_class_id, ser_proto);
+    c.JS_SetClassProto(ctx, serializerClassId(ctx), ser_proto);
     if (c.JS_DefinePropertyValueStr(ctx, ns, "Serializer", ser_ctor, c.JS_PROP_C_W_E) < 0) return -1;
 
-    _ = c.JS_NewClassID(rt, &deserializer_class_id);
-    if (c.JS_NewClass(rt, deserializer_class_id, &deserializer_class) < 0) return -1;
+    if (c.tjs__v8_class_register(ctx, c.TJS_V8_CLASS_DESERIALIZER, &deserializer_class) < 0) return -1;
 
     const des_proto = c.JS_NewObject(ctx);
     if (c.JS_IsException(des_proto)) return -1;
@@ -472,7 +475,7 @@ pub fn initModV8Compat(ctx: ?*c.JSContext, ns: c.JSValue) c_int {
         c.JS_FreeValue(ctx, des_proto);
         return -1;
     }
-    c.JS_SetClassProto(ctx, deserializer_class_id, des_proto);
+    c.JS_SetClassProto(ctx, deserializerClassId(ctx), des_proto);
     if (c.JS_DefinePropertyValueStr(ctx, ns, "Deserializer", des_ctor, c.JS_PROP_C_W_E) < 0) return -1;
 
     return 0;

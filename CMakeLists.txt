@@ -35,7 +35,7 @@ else()
 endif()
 
 set(TJS__VERSION_MAJOR 26)
-set(TJS__VERSION_MINOR 6)
+set(TJS__VERSION_MINOR 11)
 set(TJS__VERSION_PATCH 0)
 set(TJS__VERSION_SUFFIX "")
 configure_file(
@@ -87,6 +87,13 @@ if(BUILD_WITH_ASAN)
         add_compile_options(/fsanitize=address)
     else()
         add_compile_options(-fsanitize=address -fno-omit-frame-pointer -fno-sanitize-recover=all)
+        # No fake stacks: WAMR's native stack overflow check compares the
+        # address of a local against the thread stack, and it also runs on
+        # exec envs WAMR creates internally (start functions), where we can't
+        # disable it. Linux enables fake stacks by default; macOS doesn't.
+        add_compile_options(
+            $<$<C_COMPILER_ID:Clang,AppleClang>:-fsanitize-address-use-after-return=never>
+            $<$<C_COMPILER_ID:GNU>:--param=asan-use-after-return=0>)
         add_link_options(-fsanitize=address)
     endif()
 endif()
@@ -154,6 +161,7 @@ add_library(tjs STATIC
     src/version.c
     src/vm.c
     src/worker.c
+    src/zig_c_bindings.c
     src/mod_channel.c
     src/mod_dns.c
     src/mod_engine.c
@@ -206,6 +214,10 @@ endif()
 
 if(UNIX)
     target_sources(tjs PRIVATE src/mod_posix-socket.c)
+endif()
+
+if(WIN32)
+    target_sources(tjs PRIVATE src/mbedtls_threading_win32.c)
 endif()
 
 if(BUILD_WITH_WASM)
@@ -335,6 +347,7 @@ set(TJS_ZIG_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/tjs_qjs_allocator.zig"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/tjs_structs.zig"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/v8_serialize.zig"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/zig_c_bindings.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/zig_c_bindings.zig"
 )
 
@@ -628,10 +641,15 @@ function(tjs_apply_patches target_dir prefix)
 endfunction()
 
 # mbedTLS upstream has no QUIC support; patches/mbedtls-quic.patch adds it (from
-# warmcat's quic-v3.6.6 mbedTLS branch — credit libwebsockets).
+# warmcat's quic-v3.6.6 mbedTLS branch, rebased onto 3.6.7 — credit libwebsockets).
 tjs_apply_patches("${CMAKE_CURRENT_SOURCE_DIR}/deps/mbedtls" "mbedtls-")
 
 add_subdirectory(deps/mbedtls EXCLUDE_FROM_ALL)
+if(WIN32)
+    # threading_alt.h for MBEDTLS_THREADING_ALT. PUBLIC so every target that
+    # includes mbedtls headers (mbedx509, mbedtls, websockets, tjs) sees it.
+    target_include_directories(mbedcrypto PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls_alt)
+endif()
 if(BUILD_WITH_LWS)
     target_link_libraries(tjs PUBLIC mbedtls mbedx509 mbedcrypto)
 else()
@@ -662,6 +680,13 @@ set(LWS_WITH_LWSAC OFF CACHE BOOL "" FORCE)
 set(LWS_WITH_CONMON OFF CACHE BOOL "" FORCE)
 set(LWS_WITH_WOL OFF CACHE BOOL "" FORCE)
 set(LWS_WITH_STUB OFF CACHE BOOL "" FORCE)
+# Default ON since lws 5.1, none of them used by txiki.js.
+set(LWS_WITH_GIF OFF CACHE BOOL "" FORCE)
+set(LWS_WITH_SVG OFF CACHE BOOL "" FORCE)
+set(LWS_WITH_MD OFF CACHE BOOL "" FORCE)
+set(LWS_WITH_HL OFF CACHE BOOL "" FORCE)
+set(LWS_WITH_CACHE_BLOB OFF CACHE BOOL "" FORCE)
+set(LWS_WITH_SYS_INFO OFF CACHE BOOL "" FORCE)
 # BASIC_AUTH must stay ON: it gates the client-side "Proxy-Authorization:
 # basic" header (connect4.c), without which authenticated proxy URLs
 # (http_proxy=http://user:pass@host:port) route through the proxy but never
@@ -735,10 +760,34 @@ set(LWS_HAVE_mbedtls_ssl_set_export_keys_cb 1 CACHE BOOL "" FORCE)
 set(LWS_MBEDTLS_LIBRARIES mbedtls mbedx509 mbedcrypto CACHE STRING "" FORCE)
 set(LWS_MBEDTLS_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/deps/mbedtls/include" CACHE STRING "" FORCE)
 
-# Carried fixes for libwebsockets (patches/lws-*.patch), each upstreamed:
-#   - lws-mbedtls-client-alpn-uaf.patch: stack-use-after-scope in
-#     lws_ssl_client_bio_create() on the QUIC->TCP HTTP/3 fallback path
-#     (warmcat/libwebsockets#3658).
+# Carried fixes for libwebsockets (patches/lws-*.patch), none upstream yet:
+#   - lws-vhost-inherit-context-log-cx.patch: a vhost created without
+#     info->log_cx (e.g. lws's internal "system" vhost) bound to the global
+#     log context instead of its context's, so per-runtime log contexts still
+#     raced on the global one's unlocked refcount across Worker threads.
+#   - lws-socks5-empty-address-disables.patch: socks_proxy_address = "" (our
+#     "no socks proxy") fails vhost creation since upstream 3e7f041dd, and
+#     NULL would make lws honour socks_proxy from the environment.
+#   - lws-h1-restart-queued-on-connection-close.patch: requests queued on an
+#     h1 connection whose response says it won't be kept alive were moved
+#     back to "unconnected" but never restarted, so they never settled.
+#   - lws-mbedtls-client-no-h3-alpn-over-tcp.patch: the client offers its
+#     per-connection ALPN list verbatim, and a list without h3 disables the
+#     h3 upgrade, so ours names h3; keep it off the TCP handshake (Fastly
+#     selects it there).
+#   - lws-cache-l1-serves-when-jar-busy.patch: lws no longer waits for the
+#     shared cookie jar's lock, and a cookie whose jar write was skipped
+#     because another tjs process held it was not sent back even in-process.
+#   - lws-remove-from-sul-clears-close-decided.patch: an h1 request aborted
+#     just before its transaction completed and handed its connection to a
+#     queued one was never closed, only freed when the runtime exited.
+#   - lws-h2-empty-body-completion-any-method.patch: an h2 request ended with
+#     its HEADERS got the empty body completion only for POST, so an empty
+#     no-Content-Length PUT / PATCH / DELETE whose body we stream never ended.
+#   - lws-h2-client-rst-abandoned-stream.patch: a client h2 stream closed
+#     before its answer ended (an aborted fetch on a pooled connection) was
+#     never reset, so the server went on sending its answer; it now gets
+#     RST_STREAM(CANCEL), the client side of upstream 35c77bb96b.
 tjs_apply_patches("${CMAKE_CURRENT_SOURCE_DIR}/deps/libwebsockets" "lws-")
 
 add_subdirectory(deps/libwebsockets EXCLUDE_FROM_ALL)

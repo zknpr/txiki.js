@@ -7,6 +7,8 @@
 
 pub const c = @cImport({
     @cInclude("quickjs.h");
+    // Per-runtime class ids for the tjs:v8 classes (src/zig_c_bindings.c).
+    @cInclude("zig_c_bindings.h");
 });
 
 pub fn JS_CFUNC_DEF(
@@ -46,10 +48,12 @@ pub fn JS_CGETSET_DEF(
 
 const js_nan_boxing = c.INTPTR_MAX < c.INT64_MAX;
 
+// Mirrors quickjs.h's JS_MKVAL, which writes all 64 bits of the union:
+// (JSValueUnion){ .uint64 = (uint32_t)(val) }.
 fn jsMkVal(comptime tag: i64, comptime value: i32) c.JSValue {
     return .{
         .tag = tag,
-        .u = .{ .int32 = value },
+        .u = .{ .uint64 = @as(u32, @bitCast(value)) },
     };
 }
 

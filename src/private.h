@@ -37,6 +37,7 @@
 #ifdef TJS_HAVE_SQLITE
 #include <sqlite3.h>
 #endif
+#include <stdatomic.h>
 #include <stdbool.h>
 #ifndef _WIN32
 #include <unistd.h>
@@ -62,6 +63,7 @@
 #endif
 
 typedef struct TJSTimer TJSTimer;
+typedef struct TJSBufPin TJSBufPin;
 
 typedef struct {
     struct list_head link;
@@ -88,6 +90,59 @@ typedef struct TJSHandlePin {
     void (*detach)(struct TJSHandlePin *pin);
 } TJSHandlePin;
 
+/* Counted self-pin held while libuv requests (write, shutdown, send) are in
+ * flight on a handle. Separate from the handle's read/listen/connect pin. */
+typedef struct {
+    TJSHandlePin pin;
+    unsigned int count;
+} TJSReqPin;
+
+/* Native classes. Their JSClassIDs are allocated per runtime (TJSRuntime.class_ids),
+ * since each runtime numbers its classes independently. */
+typedef enum {
+    TJS_CLASS_HTTPCLIENT,
+    TJS_CLASS_HTTPSERVER,
+    TJS_CLASS_WSCONN,
+    TJS_CLASS_PORT,
+    TJS_CLASS_BROADCAST,
+    TJS_CLASS_FFI_POINTER,
+    TJS_CLASS_FFI_EXTERNAL_AB,
+    TJS_CLASS_FFI_TYPE,
+    TJS_CLASS_UV_DLSYM,
+    TJS_CLASS_FFI_CIF,
+    TJS_CLASS_UV_LIB,
+    TJS_CLASS_FFI_CLOSURE,
+    TJS_CLASS_FILE,
+    TJS_CLASS_DIR,
+    TJS_CLASS_DIRENT,
+    TJS_CLASS_STAT,
+    TJS_CLASS_FSWATCH,
+    TJS_CLASS_HASH,
+    TJS_CLASS_COMPRESSOR,
+    TJS_CLASS_DECOMPRESSOR,
+    TJS_CLASS_SOCK,
+    TJS_CLASS_PROCESS,
+    TJS_CLASS_SQLITE3,
+    TJS_CLASS_SQLITE3_STMT,
+    TJS_CLASS_TCP,
+    TJS_CLASS_TTY,
+    TJS_CLASS_PIPE,
+    TJS_CLASS_TLS,
+    TJS_CLASS_UDP,
+    TJS_CLASS_SIGNAL_HANDLER,
+    TJS_CLASS_UTF8_DECODER,
+    TJS_CLASS_URLSEARCHPARAMS,
+    TJS_CLASS_URL,
+    TJS_CLASS_WASM_MODULE,
+    TJS_CLASS_WASM_INSTANCE,
+    TJS_CLASS_WORKER,
+    TJS_CLASS_WS,
+    /* tjs:v8, registered from Zig through src/zig_c_bindings.c. */
+    TJS_CLASS_V8_SERIALIZER,
+    TJS_CLASS_V8_DESERIALIZER,
+    TJS_CLASS__COUNT
+} TJSClass;
+
 struct TJSRuntime {
     TJSRunOptions options;
     JSRuntime *rt;
@@ -100,7 +155,11 @@ struct TJSRuntime {
     } jobs;
     uv_async_t stop;
     bool is_worker;
+    /* Set by the parent thread when it reaps the worker; read by the worker's
+     * interrupt handler to abort JS that never yields to the loop. */
+    atomic_bool terminating;
     bool draining_microtasks;
+    bool microtasks_stopped;
 #ifdef TJS_HAVE_WASM
     struct {
         bool initialized;
@@ -128,6 +187,11 @@ struct TJSRuntime {
 #ifdef TJS_HAVE_LWS
         uv_async_t keepalive;
         int active_conns;
+        /* Every lws context, vhost and wsi of this runtime binds to it. lws
+         * refcounts its log context without a lock (LWS_MAX_SMP == 1), so
+         * runtimes on different threads must not share lws's global one. It
+         * must outlive all of them: see the assert in TJS_FreeRuntime. */
+        lws_log_cx_t log_cx;
 #endif
     } lws;
     struct {
@@ -151,19 +215,41 @@ struct TJSRuntime {
     /* Self-pins of all active native handles (TJSHandlePin), so teardown can
      * drop them and let the final GC collect and close the handles. */
     struct list_head handle_pins;
+    /* Pin counts of the ArrayBuffers native requests are using (TJSBufferRef). */
+    TJSBufPin *buf_pins;
+    JSClassID class_ids[TJS_CLASS__COUNT];
 };
+
+static inline JSClassID tjs__class_id(JSContext *ctx, TJSClass c) {
+    return ((TJSRuntime *) JS_GetContextOpaque(ctx))->class_ids[c];
+}
+
+static inline JSClassID tjs__class_id_rt(JSRuntime *rt, TJSClass c) {
+    return ((TJSRuntime *) JS_GetRuntimeOpaque(rt))->class_ids[c];
+}
+
+/* Allocate (in this runtime) and register a native class. Idempotent per runtime.
+ * Returns -1 with an exception pending on failure. */
+int tjs__class_register(JSContext *ctx, TJSClass c, const JSClassDef *def);
 
 /* Pin/unpin a native handle's JS wrapper for the duration of an async op, and
  * register/deregister the pin so teardown can release it. Idempotent: pinning an
  * already-pinned handle or unpinning an idle one is a no-op. */
 void tjs__handle_pin(JSContext *ctx, TJSHandlePin *pin, JSValue obj);
 void tjs__handle_unpin(JSContext *ctx, TJSHandlePin *pin);
+/* Count one in-flight request; the first one pins `obj` (borrowed). Call only
+ * once libuv has accepted the request. An undefined `obj` only counts. */
+void tjs__req_pin_acquire(JSContext *ctx, TJSReqPin *rp, JSValue obj);
+/* Release one request; the last one unpins, which may finalize the wrapper, so
+ * it must be the last thing the request's callback does. */
+void tjs__req_pin_release(JSContext *ctx, TJSReqPin *rp);
 /* Teardown, before the lws context is destroyed: run each registered pin's
  * `detach` hook (no-op for pins without one) so lws-backed wrappers stop
  * dispatching to JS before their close callbacks fire. */
 void tjs__detach_handles(TJSRuntime *qrt);
 /* Teardown: drop every registered self-pin so the objects become collectable. */
 void tjs__release_pins(TJSRuntime *qrt);
+void tjs__free_buf_pins(TJSRuntime *qrt);
 
 void tjs__mod_channel_init(JSContext *ctx, JSValue ns);
 
@@ -175,7 +261,9 @@ typedef struct TJSMailbox TJSMailbox;
 bool tjs__channel_mailbox_pair(TJSMailbox **a, TJSMailbox **b);
 JSValue tjs__channel_port_new(JSContext *ctx, TJSMailbox *rx, TJSMailbox *tx);
 void tjs__channel_mailbox_unref(TJSMailbox *mb);
-void tjs__channel_port_close(JSValue port_handle);
+void tjs__channel_port_close(JSRuntime *rt, JSValue port_handle);
+void tjs__channel_port_flush(JSRuntime *rt, JSValue port_handle);
+void tjs__channel_port_unref(JSRuntime *rt, JSValue port_handle);
 void tjs__channel_port_post_error(JSContext *ctx, JSValue port_handle, JSValueConst error_obj);
 
 void tjs__mod_dns_init(JSContext *ctx, JSValue ns);
@@ -208,8 +296,10 @@ void tjs__mod_sys_init(JSContext *ctx, JSValue ns);
 void tjs__mod_text_coding_init(JSContext *ctx, JSValue ns);
 void tjs__mod_timers_init(JSContext *ctx, JSValue ns);
 void tjs__mod_udp_init(JSContext *ctx, JSValue ns);
+void tjs__mod_v8_init(JSContext *ctx, JSValue ns);
 #ifdef TJS_HAVE_WASM
 void tjs__mod_wasm_init(JSContext *ctx, JSValue ns);
+void tjs__wasm_global_init(void);
 #endif
 void tjs__mod_worker_init(JSContext *ctx, JSValue ns);
 #ifdef TJS_HAVE_WEBCRYPTO
@@ -247,6 +337,10 @@ int tjs__load_file(JSContext *ctx, TBuf *dbuf, const char *filename);
 int tjs_module_attr_checker(JSContext *ctx, void *opaque, JSValueConst attributes);
 JSModuleDef *tjs_module_loader(JSContext *ctx, const char *module_name, void *opaque, JSValueConst attributes);
 char *tjs_module_normalizer(JSContext *ctx, const char *base_name, const char *name, void *opaque);
+bool tjs__is_file_url(const char *s);
+/* Convert a file:// URL into a native path. Returns a js_malloc'd string, or
+ * NULL with a pending TypeError if the URL can't be mapped to a local path. */
+char *tjs__file_url_to_path(JSContext *ctx, const char *url);
 
 int js_module_set_import_meta(JSContext *ctx, JSValue func_val, bool use_realpath, bool is_main);
 
@@ -259,19 +353,31 @@ void tjs__destroy_timers(TJSRuntime *qrt);
 void tjs__sab_free(void *opaque, void *ptr);
 void tjs__sab_dup(void *opaque, void *ptr);
 
+#ifdef _WIN32
+/* mbedcrypto is linked with or without lws, and mbedtls_config.h enables its
+ * threading layer on every Windows build. */
+void tjs__mbedtls_threading_init(void);
+#endif
+
 #ifdef TJS_HAVE_LWS
 extern const lws_plugin_evlib_t tjs_lws_evlib;
 
 struct lws_context *tjs__lws_get_context(JSContext *ctx);
 void tjs__lws_setup(void);
+void tjs__lws_init_log_cx(TJSRuntime *qrt);
+void tjs__lws_keepalive_init(TJSRuntime *qrt);
 void tjs__lws_conn_ref(JSContext *ctx);
 void tjs__lws_conn_unref(JSContext *ctx);
 struct lws_vhost *tjs__lws_select_vhost(JSContext *ctx, const char *scheme, const char *hostname, int port);
 int tjs__lws_load_http(TJSRuntime *qrt, TBuf *dbuf, const char *url);
 void tjs__lws_format_host(char *buf, size_t buflen, const char *scheme, const char *host, int port);
+void tjs__lws_request_path(const char *url, char *buf, size_t buflen);
 #endif
 
 uv_loop_t *TJS_GetLoop(TJSRuntime *qrt);
+/* Stop a worker runtime from another thread, aborting any JS it is running
+ * (unlike TJS_Stop, which waits for the running JS to return to the loop). */
+void tjs__runtime_terminate(TJSRuntime *qrt);
 TJSRuntime *TJS_NewRuntimeWorker(void);
 TJSRuntime *TJS_NewRuntimeInternal(bool is_worker, TJSRunOptions *options);
 JSValue TJS_EvalScript(JSContext *ctx, const char *filename);

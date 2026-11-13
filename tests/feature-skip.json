@@ -9,21 +9,50 @@
     "test-sqlite-primary-async.js",
     "test-dispose-database.js",
     "test-dispose-statement.js",
+    "test-native-error-class.js",
     "test-storage.js"
   ],
   "ffi": [
     "test-ffi-*.js",
-    "test-dispose-ffi-dlopen.js"
+    "test-dispose-ffi-dlopen.js",
+    "test-native-error-class.js",
+    "test-sab-alignment.js",
+    "test-worker-ffi-classes.js"
   ],
   "url": [
     "test-dispose-worker.js",
     "test-worker-error-*.js",
     "test-worker-self-close.js",
-    "test-worker-url.js"
+    "test-worker-url.js",
+    "test-buffer-pin-fetch-body.js",
+    "test-headers-set-cookie.js",
+    "test-import-file-url.js",
+    "test-import-file-url-encoded.js",
+    "test-import-file-url-same-instance.js",
+    "test-import-file-url-static.js",
+    "test-import-map-file-url.js",
+    "test-run-file-url.js",
+    "test-worker-file-url.js",
+    "test-worker-gc-unreachable.js",
+    "test-worker-self-stop-exit.js",
+    "test-worker-terminate-busy.js"
   ],
   "webcrypto": [
     "test-webcrypto-*.js",
-    "test-app-compile.js"
+    "test-app-compile.js",
+    "test-app-compile-corrupted-cache.js",
+    "test-buffer-pin-overlapping.js",
+    "test-buffer-pin-overlapping-reverse.js",
+    "test-buffer-pin-webcrypto-import.js",
+    "test-crypto-digest-transfer-after-await.js",
+    "test-pipe-gc-pending-write.js",
+    "test-tcp-gc-pending-write.js",
+    "test-teardown-threadpool-digest-loop.js",
+    "test-teardown-threadpool-inflight.js",
+    "test-teardown-threadpool-sync-throw.js",
+    "test-worker-terminate-threadpool-digest.js",
+    "test-worker-terminate-threadpool-digest-loop.js",
+    "test-worker-terminate-threadpool-nested.js"
   ],
   "lws": [
     "test-fetch*.js",

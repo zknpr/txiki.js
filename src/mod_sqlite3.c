@@ -31,7 +31,6 @@
 #include <string.h>
 
 
-static JSClassID tjs_sqlite3_class_id;
 typedef struct TJSSqlite3Stmt TJSSqlite3Stmt;
 
 static void *tjs_sqlite3_raw_copy(const void *data, size_t length, bool terminate);
@@ -225,7 +224,7 @@ static int tjs_sqlite3_close_locked(TJSSqlite3Handle *h) {
 }
 
 static void tjs_sqlite3_finalizer(JSRuntime *rt, JSValue val) {
-    TJSSqlite3Handle *h = JS_GetOpaque(val, tjs_sqlite3_class_id);
+    TJSSqlite3Handle *h = JS_GetOpaque(val, tjs__class_id_rt(rt, TJS_CLASS_SQLITE3));
     if (!h) {
         return;
     }
@@ -256,7 +255,7 @@ static JSValue tjs_new_sqlite3(JSContext *ctx, sqlite3 *handle) {
     TJSSqlite3Handle *h;
     JSValue obj;
 
-    obj = JS_NewObjectClass(ctx, tjs_sqlite3_class_id);
+    obj = JS_NewObjectClass(ctx, tjs__class_id(ctx, TJS_CLASS_SQLITE3));
     if (JS_IsException(obj)) {
         return obj;
     }
@@ -280,10 +279,8 @@ static JSValue tjs_new_sqlite3(JSContext *ctx, sqlite3 *handle) {
 }
 
 static TJSSqlite3Handle *tjs_sqlite3_get(JSContext *ctx, JSValue obj) {
-    return JS_GetOpaque2(ctx, obj, tjs_sqlite3_class_id);
+    return JS_GetOpaque2(ctx, obj, tjs__class_id(ctx, TJS_CLASS_SQLITE3));
 }
-
-static JSClassID tjs_sqlite3_stmt_class_id;
 
 struct TJSSqlite3Stmt {
     sqlite3_stmt *stmt;
@@ -309,7 +306,7 @@ static void tjs_sqlite3_stmt_free(JSRuntime *rt, TJSSqlite3Stmt *h) {
 }
 
 static void tjs_sqlite3_stmt_finalizer(JSRuntime *rt, JSValue val) {
-    TJSSqlite3Stmt *h = JS_GetOpaque(val, tjs_sqlite3_stmt_class_id);
+    TJSSqlite3Stmt *h = JS_GetOpaque(val, tjs__class_id_rt(rt, TJS_CLASS_SQLITE3_STMT));
     if (!h) {
         return;
     }
@@ -337,7 +334,7 @@ static JSValue tjs_new_sqlite3_stmt(JSContext *ctx, sqlite3_stmt *stmt, TJSSqlit
     TJSSqlite3Stmt *h;
     JSValue obj;
 
-    obj = JS_NewObjectClass(ctx, tjs_sqlite3_stmt_class_id);
+    obj = JS_NewObjectClass(ctx, tjs__class_id(ctx, TJS_CLASS_SQLITE3_STMT));
     if (JS_IsException(obj)) {
         return obj;
     }
@@ -357,7 +354,7 @@ static JSValue tjs_new_sqlite3_stmt(JSContext *ctx, sqlite3_stmt *stmt, TJSSqlit
 }
 
 static TJSSqlite3Stmt *tjs_sqlite3_stmt_get(JSContext *ctx, JSValue obj) {
-    return JS_GetOpaque2(ctx, obj, tjs_sqlite3_stmt_class_id);
+    return JS_GetOpaque2(ctx, obj, tjs__class_id(ctx, TJS_CLASS_SQLITE3_STMT));
 }
 
 /* message is SQLite's own text for the failure when the caller has it, or
@@ -445,7 +442,9 @@ static JSValue tjs_sqlite3_open(JSContext *ctx, JSValue this_val, int argc, JSVa
 
     // Installed before JavaScript can reach the handle, so it covers every
     // statement the connection compiles, including on the thread pool.
-    r = sqlite3_set_authorizer(handle, tjs_sqlite3_authorizer, JS_GetOpaque(obj, tjs_sqlite3_class_id));
+    r = sqlite3_set_authorizer(handle,
+                               tjs_sqlite3_authorizer,
+                               JS_GetOpaque(obj, tjs__class_id(ctx, TJS_CLASS_SQLITE3)));
     if (r != SQLITE_OK) {
         // The finalizer closes the handle.
         JS_FreeValue(ctx, obj);
@@ -475,7 +474,7 @@ static JSValue tjs_sqlite3_vacuum_into(JSContext *ctx, JSValue this_val, int arg
     char *errmsg = NULL;
     if (!handle) {
         JS_FreeCString(ctx, target);
-        return JS_ThrowInternalError(ctx, "Database is closed");
+        return JS_ThrowPlainError(ctx, "Database is closed");
     }
     // A primary connection lent to the thread pool is busy until it returns.
     r = lent ? SQLITE_BUSY : tjs_sqlite3_vacuum_into_on_thread(h, handle, target, &errmsg);
@@ -586,7 +585,7 @@ static JSValue tjs_sqlite3_set_query_deadline(JSContext *ctx, JSValue this_val, 
     uv_mutex_lock(&h->mutex);
     if (!h->handle || h->closing) {
         uv_mutex_unlock(&h->mutex);
-        return JS_ThrowInternalError(ctx, "Database is closed");
+        return JS_ThrowPlainError(ctx, "Database is closed");
     }
     if (h->async_refs != 0) {
         uv_mutex_unlock(&h->mutex);
@@ -608,7 +607,7 @@ static JSValue tjs_sqlite3_clear_query_deadline(JSContext *ctx, JSValue this_val
     uv_mutex_lock(&h->mutex);
     if (!h->handle || h->closing) {
         uv_mutex_unlock(&h->mutex);
-        return JS_ThrowInternalError(ctx, "Database is closed");
+        return JS_ThrowPlainError(ctx, "Database is closed");
     }
     if (h->async_refs != 0) {
         uv_mutex_unlock(&h->mutex);
@@ -1617,7 +1616,7 @@ static JSValue tjs_sqlite3_async_operation(JSContext *ctx,
     if (!h->handle || h->closing) {
         uv_mutex_unlock(&h->mutex);
         tjs_sqlite3_async_req_free(ar);
-        return JS_ThrowInternalError(ctx, "Database is closed");
+        return JS_ThrowPlainError(ctx, "Database is closed");
     }
     if (h->async_refs != 0) {
         uv_mutex_unlock(&h->mutex);
@@ -1681,7 +1680,7 @@ static JSValue tjs_sqlite3_stmt_all(JSContext *ctx, JSValue this_val, int argc, 
     }
 
     if (!h->stmt) {
-        return JS_ThrowInternalError(ctx, "Statement has been finalized");
+        return JS_ThrowPlainError(ctx, "Statement has been finalized");
     }
 
     // sqlite3_reset returns the error of the previous step, which the previous
@@ -1733,7 +1732,7 @@ static JSValue tjs_sqlite3_stmt_run(JSContext *ctx, JSValue this_val, int argc, 
     }
 
     if (!h->stmt) {
-        return JS_ThrowInternalError(ctx, "Statement has been finalized");
+        return JS_ThrowPlainError(ctx, "Statement has been finalized");
     }
 
     // sqlite3_reset returns the error of the previous step, which the previous
@@ -1781,17 +1780,13 @@ static const JSCFunctionListEntry tjs_sqlite3_funcs[] = {
 };
 
 void tjs__mod_sqlite3_init(JSContext *ctx, JSValue ns) {
-    JSRuntime *rt = JS_GetRuntime(ctx);
-
     /* Handle object */
-    JS_NewClassID(rt, &tjs_sqlite3_class_id);
-    JS_NewClass(rt, tjs_sqlite3_class_id, &tjs_sqlite3_class);
-    JS_SetClassProto(ctx, tjs_sqlite3_class_id, JS_NULL);
+    CHECK_EQ(tjs__class_register(ctx, TJS_CLASS_SQLITE3, &tjs_sqlite3_class), 0);
+    JS_SetClassProto(ctx, tjs__class_id(ctx, TJS_CLASS_SQLITE3), JS_NULL);
 
     /* Statement object */
-    JS_NewClassID(rt, &tjs_sqlite3_stmt_class_id);
-    JS_NewClass(rt, tjs_sqlite3_stmt_class_id, &tjs_sqlite3_stmt_class);
-    JS_SetClassProto(ctx, tjs_sqlite3_stmt_class_id, JS_NULL);
+    CHECK_EQ(tjs__class_register(ctx, TJS_CLASS_SQLITE3_STMT, &tjs_sqlite3_stmt_class), 0);
+    JS_SetClassProto(ctx, tjs__class_id(ctx, TJS_CLASS_SQLITE3_STMT), JS_NULL);
 
     JSValue obj = JS_NewObjectProto(ctx, JS_NULL);
     JS_SetPropertyFunctionList(ctx, obj, tjs_sqlite3_funcs, countof(tjs_sqlite3_funcs));

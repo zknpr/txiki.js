@@ -24,12 +24,22 @@ export class Headers {
         }
     }
 
+    // Set-Cookie values are kept as a list: they must never be combined into
+    // one line (RFC 6265 § 3), so iteration yields one entry per cookie.
     append(name, value) {
         name = normalizeName(name);
         value = normalizeValue(value);
         var oldValue = this.#map[name];
 
-        this.#map[name] = oldValue ? oldValue + ', ' + value : value;
+        if (name === 'set-cookie') {
+            if (oldValue) {
+                oldValue.push(value);
+            } else {
+                this.#map[name] = [ value ];
+            }
+        } else {
+            this.#map[name] = oldValue ? oldValue + ', ' + value : value;
+        }
     }
 
     delete(name) {
@@ -39,7 +49,17 @@ export class Headers {
     get(name) {
         name = normalizeName(name);
 
-        return this.has(name) ? this.#map[name] : null;
+        if (!this.has(name)) {
+            return null;
+        }
+
+        const value = this.#map[name];
+
+        return name === 'set-cookie' ? value.join(', ') : value;
+    }
+
+    getSetCookie() {
+        return this.has('set-cookie') ? [ ...this.#map['set-cookie'] ] : [];
     }
 
     has(name) {
@@ -47,13 +67,22 @@ export class Headers {
     }
 
     set(name, value) {
-        this.#map[normalizeName(name)] = normalizeValue(value);
+        name = normalizeName(name);
+        value = normalizeValue(value);
+
+        this.#map[name] = name === 'set-cookie' ? [ value ] : value;
     }
 
     forEach(callback, thisArg) {
         for (const name in this.#map) {
             if (Object.prototype.hasOwnProperty.call(this.#map, name)) {
-                callback.call(thisArg, this.#map[name], name, this);
+                if (name === 'set-cookie') {
+                    for (const value of [ ...this.#map[name] ]) {
+                        callback.call(thisArg, value, name, this);
+                    }
+                } else {
+                    callback.call(thisArg, this.#map[name], name, this);
+                }
             }
         }
     }
@@ -97,12 +126,26 @@ export class Headers {
     }
 }
 
+export function isValidHeaderName(name) {
+    return /^[a-z0-9\-#$%&'*+.^_`|~!]+$/i.test(name);
+}
+
+export function trimHeaderValue(value) {
+    return String(value).replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, '');
+}
+
+// A CR or LF left inside a value would end the header line on the wire and
+// let the rest of the value be sent as headers of its own.
+export function isValidHeaderValue(value) {
+    return !/[\0\r\n]/.test(value);
+}
+
 export function normalizeName(name) {
     if (typeof name !== 'string') {
         name = String(name);
     }
 
-    if (/[^a-z0-9\-#$%&'*+.^_`|~!]/i.test(name) || name === '') {
+    if (!isValidHeaderName(name)) {
         throw new TypeError('Invalid character in header field name: "' + name + '"');
     }
 
@@ -111,8 +154,10 @@ export function normalizeName(name) {
 
 
 export function normalizeValue(value) {
-    if (typeof value !== 'string') {
-        value = String(value);
+    value = trimHeaderValue(value);
+
+    if (!isValidHeaderValue(value)) {
+        throw new TypeError('Invalid character in header field value');
     }
 
     return value;

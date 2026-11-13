@@ -22,7 +22,7 @@ TJS=$(BUILD_DIR)/tjs
 TJSC=$(BUILD_DIR)/tjsc
 STDLIB_MODULES=$(wildcard src/js/stdlib/*.js)
 POLYFILLS_SOURCES=src/js/polyfills/*.js src/js/polyfills/**/*.js src/js/stdlib/utils.js
-ESBUILD?=npx esbuild
+ESBUILD?=pnpm exec esbuild
 ESBUILD_PARAMS_COMMON=--target=esnext --platform=neutral --format=esm --main-fields=main,module
 ESBUILD_PARAMS_MINIFY=--minify --keep-names
 POLYFILLS_URL_ON=--alias:@tjs/polyfill-url=./src/js/polyfills/url.js --alias:@tjs/worker-url=./src/js/polyfills/worker-url.js
@@ -178,6 +178,15 @@ src/bundles/c/core/worker-bootstrap.c: $(TJSC) src/js/worker/worker-bootstrap.js
 		-p tjs__ \
 		src/js/worker/worker-bootstrap.js
 
+src/bundles/c/internal/home.c: $(TJSC) src/js/internal/home.js
+	@mkdir -p $(dir $@)
+	$(TJSC) -m \
+		$(TJSC_PARAMS_STIP) \
+		-o $@ \
+		-n "tjs:internal/home" \
+		-p tjs__internal_ \
+		src/js/internal/home.js
+
 src/bundles/c/internal/path.c: $(TJSC) src/js/internal/path.js
 	@mkdir -p $(dir $@)
 	$(TJSC) -m \
@@ -187,10 +196,10 @@ src/bundles/c/internal/path.c: $(TJSC) src/js/internal/path.js
 		-p tjs__internal_ \
 		src/js/internal/path.js
 
-core: src/bundles/c/core/polyfills.c src/bundles/c/core/no-ada/polyfills.c src/bundles/c/core/no-webcrypto/polyfills.c src/bundles/c/core/minimal/polyfills.c src/bundles/c/core/core.c src/bundles/c/core/run-main.c src/bundles/c/core/run-repl.c src/bundles/c/core/worker-bootstrap.c src/bundles/c/internal/path.c
+core: src/bundles/c/core/polyfills.c src/bundles/c/core/no-ada/polyfills.c src/bundles/c/core/no-webcrypto/polyfills.c src/bundles/c/core/minimal/polyfills.c src/bundles/c/core/core.c src/bundles/c/core/run-main.c src/bundles/c/core/run-repl.c src/bundles/c/core/worker-bootstrap.c src/bundles/c/internal/home.c src/bundles/c/internal/path.c
 
 # tjs:v8 has no source-level dependencies to bundle. Compile it directly so
-# the native bootstrap and its bytecode can be built before npm dependencies
+# the native bootstrap and its bytecode can be built before pnpm dependencies
 # are installed, while still keeping the generated C file under `make js`.
 src/bundles/c/stdlib/v8.c: $(TJSC) src/js/stdlib/v8.js
 	@mkdir -p $(basename $(dir $@))
@@ -250,13 +259,13 @@ format:
 	clang-format -i src/*.{c,h}
 
 lint:
-	npm run lint
+	pnpm run lint
 
 test:
 	./$(BUILD_DIR)/tjs test tests/
 
 test-advanced:
-	cd tests/advanced && npm install
+	cd tests/advanced && pnpm install
 	./$(BUILD_DIR)/tjs --stack-size 10485760 test tests/advanced/
 
 .PRECIOUS: src/bundles/js/core/%.js src/bundles/js/stdlib/%.js
